@@ -64,8 +64,16 @@ def add_item(query: str, qty: int = 1) -> dict:
 
     conn = get_conn()
     conn.execute(
-        "INSERT OR REPLACE INTO cart_items (product_id, store, title, price, url, qty) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        """
+        INSERT INTO cart_items (product_id, store, title, price, url, qty)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(product_id) DO UPDATE SET
+            store = excluded.store,
+            title = excluded.title,
+            price = excluded.price,
+            url   = excluded.url,
+            qty   = cart_items.qty + excluded.qty
+        """,
         (data["product_id"], chosen["store"], chosen["title"], chosen["price"], url, max(1, qty)),
     )
     conn.commit()
@@ -85,7 +93,16 @@ def add_offer(product_id: int, store: str, qty: int = 1) -> bool:
         conn.close()
         return False
     conn.execute(
-        "INSERT OR REPLACE INTO cart_items (product_id, store, title, price, url, qty) VALUES (?, ?, ?, ?, ?, ?)",
+        """
+        INSERT INTO cart_items (product_id, store, title, price, url, qty)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(product_id) DO UPDATE SET
+            store = excluded.store,
+            title = excluded.title,
+            price = excluded.price,
+            url   = excluded.url,
+            qty   = cart_items.qty + excluded.qty
+        """,
         (product_id, store, o["title"], o["price"], o["url"], max(1, qty)),
     )
     conn.commit()

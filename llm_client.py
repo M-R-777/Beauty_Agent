@@ -2,6 +2,7 @@
 (matching listings, fixing spelling, reading look descriptions)."""
 import os
 import re
+import time
 
 from dotenv import load_dotenv
 
@@ -15,5 +16,18 @@ def chat(prompt: str) -> str:
     if _llm is None:
         from langchain_groq import ChatGroq  # imported lazily so this module always loads
         _llm = ChatGroq(model=os.getenv("GROQ_TEXT_MODEL", "openai/gpt-oss-120b"), temperature=0)
-    out = _llm.invoke(prompt).content
-    return re.sub(r"<think>.*?</think>", "", out or "", flags=re.S).strip()
+
+    last_err = None
+    for attempt in range(3):
+        try:
+            out = _llm.invoke(prompt).content
+            cleaned = re.sub(r"<think>.*?</think>", "", out or "", flags=re.S).strip()
+            if cleaned:
+                return cleaned
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+    if last_err:
+        raise last_err
+    return ""

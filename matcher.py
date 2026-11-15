@@ -13,20 +13,21 @@ MAX_LISTINGS = 30
 PROMPT = """You match online shopping listings to a beauty / personal-care product search.
 
 SEARCH: "<<QUERY>>"
-<<TYPE>>The search may contain spelling mistakes and may leave out the brand.
+<<TYPE>>The search may contain spelling mistakes, abbreviations (e.g. 'vit c' = 'Vitamin C', 'ha' = 'Hyaluronic Acid'), or omit the brand or full line name.
 
 LISTINGS (index: title):
 <<LINES>>
 
 Rules:
 1. BRAND: if the search names a brand, the listing must be that brand. Ignore spelling, punctuation and spacing ('elf' = 'e.l.f.', 'loreal' = "L'Oreal Paris"). If the search names no brand, any brand is fine.
-2. PRODUCT LINE: if the search contains a specific product or line name (a proper name such as 'Extraordinary Oil', 'Fit Me', 'Glow Reviver', 'True Match'), the listing must be that same line. A different line from the same brand is NOT a match. Generic descriptions (skin tint, matte, hydrating, long wear) are not line names: for those, pick the closest product of the right brand and type.
-3. TYPE AND FORM must match: a hair oil or serum is NOT a shampoo or conditioner; a compact powder is NOT a foundation; a liquid lip oil is NOT a lip oil stick; a lipstick is NOT a lip balm, unless the search asks for that.
-4. A single product is NOT a combo, set, kit or multi-pack, unless the search asks for one.
-5. If the search gives a shade, number or size, prefer the listing with it. If you can only find the right product in another shade or size, pick it and set exact to false.
-6. Tolerate spelling mistakes everywhere.
-7. "same" = every listing that is the SAME product as your pick (same brand, line, type, shade and size), from any store, including your pick.
-8. If nothing fits rules 1 to 3, set best to null.
+2. PRODUCT LINE & DESCRIPTORS: if the search names a specific product line (e.g. 'Fit Me', 'Extraordinary Oil', 'Glow Reviver'), match that line. However, descriptive formula/benefit terms (such as 'tubing', 'waterproof', 'matte', 'hydrating', 'vitamin c', 'niacinamide', 'spf 50', 'face') may not appear verbatim in every store title—if the brand and product type match the known product (for example 'Staze 9to9 All Eyes On You Mascara' for 'staze tubing mascara', or 'Minimalist Vitamin C 10% Face Serum' for 'minimalist vit c 10% serum'), treat it as a match.
+3. LANGUAGE PREFERENCE: Some listings may have Hindi/Devanagari titles for the exact same product. Always pick an English-language listing as "best" whenever one is available, and include both the English and Hindi listings of that exact product in "same".
+4. TYPE AND FORM must match: a hair oil or serum is NOT a shampoo or conditioner; a compact powder is NOT a foundation; a lipstick is NOT a lip balm, unless the search asks for that.
+5. A single product is NOT a combo, set, kit or multi-pack, unless the search asks for one.
+6. If the search gives a shade, number or size, prefer the listing with it. If you can only find the right product in another shade or size, pick it and set exact to false.
+7. Tolerate spelling mistakes and abbreviations everywhere.
+8. "same" = every listing that is the SAME product as your pick (same brand, line, type, shade and size), from any store, including your pick.
+9. If nothing fits rules 1, 2, and 4, set best to null.
 
 Return ONLY JSON, nothing else: {"best": <index or null>, "same": [<indexes>], "exact": <true if the pick is what the shopper asked for, false if it is only the closest alternative>}"""
 
