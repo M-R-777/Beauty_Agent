@@ -36,36 +36,43 @@ def scroll_to_bottom() -> None:
     )
 
 
-def run_agent(skip_gate: bool = False) -> tuple[str, list[str]]:
-    """Gate first, then agent. Returns (reply text, products to show as cards)."""
+def run_agent(skip_gate: bool = False) -> tuple[str, list[dict]]:
+    """Gate first, then agent. Returns (reply text, list of {name, store} card specs)."""
     if not skip_gate and not is_beauty_shopping(st.session_state.messages):
         return REFUSAL, []
 
-    # Only send recent history: long chats exceed Groq's free-tier token limit
     recent = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-8:]]
     result = agent.invoke({"messages": recent})
     msgs = result["messages"]
 
-    # Find which products the agent compared this turn, so we can show cards for them
     last_human = max((i for i, m in enumerate(msgs) if getattr(m, "type", "") == "human"), default=-1)
-    products: list[str] = []
+    products: list[dict] = []
+    seen: set[tuple[str, str]] = set()
     for m in msgs[last_human + 1:]:
         if getattr(m, "type", "") == "tool" and getattr(m, "name", "") == "compare_prices":
             try:
-                name = json.loads(m.content).get("product")
+                payload = json.loads(m.content)
+                name = payload.get("product")
+                req_store = payload.get("requested_store") or ""
             except Exception:
                 continue
-            if name and name not in products:
-                products.append(name)
+            if name and (name, req_store) not in seen:
+                seen.add((name, req_store))
+                products.append({"name": name, "store": req_store})
     return msgs[-1].content.replace("`", ""), products
 
 
 # ---------------------------------------------------------------------------
 # Product cards (Google Shopping style)
 # ---------------------------------------------------------------------------
-def render_cards(product: str, key_prefix: str) -> None:
-    data = get_offers(product)  # served from cache, no new API call
-    offers = cart.visible_offers(data)  # follows the sidebar toggle: top 3 cheapest, or the one chosen app
+def render_cards(item: dict | str, key_prefix: str) -> None:
+    product = item["name"] if isinstance(item, dict) else item
+    req_store = item.get("store", "") if isinstance(item, dict) else ""
+
+    target = req_store or (cart.get_setting("single_store") if cart.get_setting("cart_mode") == "single" else "")
+    data = get_offers(product, target_store=target)
+    offers = cart.visible_offers(data, requested_store=req_store)
+
     st.markdown(f"**{product.title()}**")
     if not offers and price_sources.TRACE.get(data["name"]):
         with st.expander("Search details"):
@@ -74,11 +81,12 @@ def render_cards(product: str, key_prefix: str) -> None:
         st.error(f"Couldn't fetch prices right now: {data['error']}")
         return
     if not offers:
-        if data["offers"] and cart.get_setting("cart_mode") == "single":
-            store = STORE_LABELS.get(cart.get_setting("single_store"), "the selected app")
-            st.info(f"Not available on {store}. Switch the cart mode to 'Cheapest across apps' to see other stores.")
+        if data["offers"] and (req_store or cart.get_setting("cart_mode") == "single"):
+            store_key = (req_store or cart.get_setting("single_store")).lower()
+            store_lbl = STORE_LABELS.get(store_key, req_store or "the selected app")
+            st.info(f"Not available on {store_lbl}. Switch the cart mode to 'Cheapest across apps' to see other stores.")
         else:
-            st.info("No store lists this product right now.")
+            st.info("No trusted store lists this product right now.")
         return
     trace = price_sources.TRACE.get(data["name"])
     if trace:
@@ -113,7 +121,7 @@ def render_cards(product: str, key_prefix: str) -> None:
 # ---------------------------------------------------------------------------
 # Sidebar: screen picker, cart toggle, shop by image
 # ---------------------------------------------------------------------------
-if "goto" in st.session_state:  # lets a button on one screen jump to another
+if "goto" in st.session_state:
     st.session_state["screen"] = st.session_state.pop("goto")
 
 with st.sidebar:
@@ -128,11 +136,11 @@ with st.sidebar:
     cart.set_setting("cart_mode", "multi" if mode_label == "Cheapest across apps" else "single")
 
     if mode_label == "One app only":
-        stores = list(STORE_LABELS)
+        trusted_keys = ["amazon", "tira", "nykaa", "ajio", "purplle", "instagram", "blinkit", "myntra", "bigbasket"]
         current = cart.get_setting("single_store")
         chosen = st.selectbox(
-            "Which app?", stores,
-            index=stores.index(current) if current in stores else 0,
+            "Which app?", trusted_keys,
+            index=trusted_keys.index(current) if current in trusted_keys else 0,
             format_func=lambda s: STORE_LABELS[s],
         )
         cart.set_setting("single_store", chosen)
@@ -177,6 +185,7 @@ def show_cart() -> None:
                 st.link_button(f"Open {group['label']} cart with all items", group["bulk_link"])
             else:
                 st.caption(f"{group['label']} has no one-click cart link; open each product above and tap Add to Bag.")
+
     st.metric("Grand total", f"₹{data['grand_total']:,.0f}")
     st.caption("Prices come from Google Shopping and can differ slightly on the store.")
     if st.button("Clear cart"):
@@ -277,13 +286,14 @@ def show_chat() -> None:
                 st.markdown(f"Searching by image: **{os.path.basename(msg['content'].split('Image path:')[-1].strip())}**")
             else:
                 st.markdown(msg["content"].replace("$", r"\$"))
-            for product in msg.get("products", []):
-                render_cards(product, f"m{idx}_{product}")
+            for item in msg.get("products", []):
+                prod_key = item["name"] if isinstance(item, dict) else item
+                render_cards(item, f"m{idx}_{prod_key}")
 
     if st.session_state.get("pending_image") or st.session_state.get("pending_prompt"):
         with st.chat_message("assistant"):
             with st.spinner("Comparing prices…"):
-                response, products = run_agent(skip_gate=True)  # these prompts come from the app itself
+                response, products = run_agent(skip_gate=True)
         st.session_state.messages.append({"role": "assistant", "content": response, "products": products})
         st.session_state.scroll = True
         st.session_state.pop("pending_image", None)

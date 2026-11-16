@@ -1,99 +1,87 @@
-"""Database setup for the beauty shopping agent.
+"""SQLite database initialization and connection helper.
 
-Run once:  python setup_db.py
-Safe to re-run: it only creates missing tables and never wipes carts or looks.
+Uses WAL (Write-Ahead Logging) mode and a 30-second busy timeout so Streamlit
+reruns and background tool calls never collide with 'database is locked'.
 """
 import os
 import sqlite3
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "beauty.db")
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS products (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT NOT NULL UNIQUE,      -- what the user asked for, lowercased
-    match_title TEXT,                     -- the product we actually matched it to
-    exact      INTEGER NOT NULL DEFAULT 1, -- 0 = closest match, not an exact one
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
--- Best listing per store for a product (refreshed from Google Shopping)
-CREATE TABLE IF NOT EXISTS offers (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id INTEGER NOT NULL,
-    store      TEXT NOT NULL,             -- nykaa / tira / amazon / ...
-    title      TEXT,
-    price      REAL NOT NULL,
-    url        TEXT,
-    delivery   TEXT,
-    thumbnail  TEXT,
-    is_mock    INTEGER NOT NULL DEFAULT 0,
-    fetched_at INTEGER NOT NULL,          -- unix seconds
-    UNIQUE (product_id, store),
-    FOREIGN KEY (product_id) REFERENCES products(id)
-);
-
--- One row per product in the cart, with the store chosen for it
-CREATE TABLE IF NOT EXISTS cart_items (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id INTEGER NOT NULL UNIQUE,
-    store      TEXT NOT NULL,
-    title      TEXT,
-    price      REAL NOT NULL,
-    url        TEXT,
-    qty        INTEGER NOT NULL DEFAULT 1,
-    FOREIGN KEY (product_id) REFERENCES products(id)
-);
-
--- Small key/value store (the UI toggle lives here so tools can read it)
-CREATE TABLE IF NOT EXISTS settings (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-
--- For the Looks screen (built in a later step)
-CREATE TABLE IF NOT EXISTS looks (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    name           TEXT NOT NULL,
-    creator        TEXT,
-    source_url     TEXT,
-    thumbnail_path TEXT,
-    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS look_items (
-    id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    look_id INTEGER NOT NULL,
-    query   TEXT NOT NULL,                -- product name to search for
-    FOREIGN KEY (look_id) REFERENCES looks(id)
-);
-"""
-
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    """Open a SQLite connection configured for safe concurrent Streamlit access."""
+    conn = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=30000;")
     return conn
 
 
 def create_database() -> None:
+    """Create all required tables and default settings if they do not exist yet."""
     conn = get_conn()
-    conn.executescript(SCHEMA)
-    pcols = [r["name"] for r in conn.execute("PRAGMA table_info(products)")]
-    if "match_title" not in pcols:
-        conn.execute("ALTER TABLE products ADD COLUMN match_title TEXT")
-        conn.execute("ALTER TABLE products ADD COLUMN exact INTEGER NOT NULL DEFAULT 1")
-        conn.execute("UPDATE offers SET fetched_at = 0")  # refresh so the match info gets filled in
-    # Migrate older databases that lack the thumbnail column
-    cols = [r["name"] for r in conn.execute("PRAGMA table_info(offers)")]
-    if "thumbnail" not in cols:
-        conn.execute("ALTER TABLE offers ADD COLUMN thumbnail TEXT")
-        conn.execute("UPDATE offers SET fetched_at = 0")  # force a refresh to get images
-    conn.execute("INSERT OR IGNORE INTO settings VALUES ('cart_mode', 'multi')")
-    conn.execute("INSERT OR IGNORE INTO settings VALUES ('single_store', 'nykaa')")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS products (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT UNIQUE NOT NULL,
+            match_title TEXT,
+            exact       INTEGER DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS offers (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            store      TEXT NOT NULL,
+            title      TEXT,
+            price      REAL NOT NULL,
+            url        TEXT,
+            delivery   TEXT,
+            thumbnail  TEXT,
+            is_mock    INTEGER DEFAULT 0,
+            fetched_at INTEGER NOT NULL,
+            FOREIGN KEY (product_id) REFERENCES products(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS cart_items (
+            product_id INTEGER PRIMARY KEY,
+            store      TEXT NOT NULL,
+            title      TEXT,
+            price      REAL NOT NULL,
+            url        TEXT,
+            qty        INTEGER DEFAULT 1,
+            FOREIGN KEY (product_id) REFERENCES products(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS looks (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            name           TEXT NOT NULL,
+            creator        TEXT,
+            source_url     TEXT,
+            thumbnail_path TEXT,
+            created_at     INTEGER DEFAULT (strftime('%s', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS look_items (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            look_id INTEGER NOT NULL,
+            query   TEXT NOT NULL,
+            FOREIGN KEY (look_id) REFERENCES looks(id)
+        );
+
+        INSERT OR IGNORE INTO settings (key, value) VALUES ('cart_mode', 'multi');
+        INSERT OR IGNORE INTO settings (key, value) VALUES ('single_store', 'nykaa');
+        """
+    )
+    # Safely add 'creator' column if an older beauty.db was created without it
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(looks)").fetchall()}
+    if "creator" not in cols:
+        conn.execute("ALTER TABLE looks ADD COLUMN creator TEXT")
     conn.commit()
     conn.close()
-    print(f"Database ready at: {DB_PATH}")
-
-
-if __name__ == "__main__":
-    create_database()

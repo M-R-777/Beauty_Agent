@@ -1,14 +1,19 @@
-"""Cart logic. The agent never places orders; it only fills carts.
+"""Shopping cart database logic and Amazon one-click bulk cart link builder.
 
-Mode (stored in the settings table, set from the Streamlit sidebar):
-  multi  -> each item goes to whichever store is cheapest for it
-  single -> every item goes to one chosen store
+Store selection rules for add_item():
+  1. If the user names a specific store (e.g., 'add to Nykaa', 'add to Tira', 'add to Amazon'),
+     use that store.
+  2. If sidebar is in 'One app only' mode and no store was explicitly named, use that selected app.
+  3. Otherwise, default to Amazon (since almost everything is available there), falling back to the
+     cheapest trusted store only if Amazon does not carry that item.
 """
 import os
 import re
 import requests
 
-from price_sources import STORE_LABELS, TOP_N, direct_link, get_offers_with_fallback, resolve_link, usable_url
+from price_sources import (
+    STORE_LABELS, TOP_N, direct_link, get_offers_with_fallback, normalize_store, resolve_link, usable_url,
+)
 from setup_db import get_conn
 
 AMAZON_ADD_URL = "https://www.amazon.in/gp/aws/cart/add.html"
@@ -29,9 +34,12 @@ def set_setting(key: str, value: str) -> None:
     conn.close()
 
 
-def visible_offers(data: dict) -> list[dict]:
-    """The offers to show, following the dashboard toggle."""
+def visible_offers(data: dict, requested_store: str = "") -> list[dict]:
+    """Return top 3 cheapest trusted offers, or the single requested/selected store."""
     offers = sorted(data["offers"].values(), key=lambda o: o["price"])
+    target = normalize_store(requested_store, data["name"]) if requested_store else None
+    if target:
+        return [o for o in offers if o["store"] == target]
     if get_setting("cart_mode") == "single":
         store = get_setting("single_store")
         return [o for o in offers if o["store"] == store]
@@ -57,39 +65,47 @@ def _upsert_cart_item(product_id: int, store: str, title: str, price: float, url
     conn.close()
 
 
-def add_item(query: str, qty: int = 1) -> dict:
-    data = get_offers_with_fallback(query)
+def add_item(query: str, qty: int = 1, store: str = "") -> dict:
+    """Add a product to the requested store's cart (defaults to Amazon if unspecified)."""
+    mode = get_setting("cart_mode")
+    explicit_store = normalize_store(store, query) if store else None
+    preferred_store = explicit_store or (get_setting("single_store") if mode == "single" else "amazon")
+
+    data = get_offers_with_fallback(query, target_store=preferred_store)
     offers = data["offers"]
     if data.get("error"):
         return {"ok": False, "error": f"Couldn't fetch prices right now: {data['error']}"}
     if not offers:
-        return {"ok": False, "error": f"No prices found for '{query}'."}
+        return {"ok": False, "error": f"No trusted store prices found for '{query}'."}
 
-    mode = get_setting("cart_mode")
-    if mode == "single":
-        store = get_setting("single_store")
-        if store not in offers:
+    if explicit_store or mode == "single":
+        if preferred_store not in offers:
+            avail = ", ".join(STORE_LABELS.get(s, s) for s in offers)
             return {
                 "ok": False,
-                "error": f"'{query}' was not found on {STORE_LABELS.get(store, store)}. "
-                         f"Available on: {', '.join(STORE_LABELS.get(s, s) for s in offers)}.",
+                "error": f"'{query}' was not found on {STORE_LABELS.get(preferred_store, preferred_store)}. "
+                         f"Available on: {avail}.",
             }
-        chosen = offers[store]
+        chosen = offers[preferred_store]
     else:
-        chosen = min(offers.values(), key=lambda o: o["price"])
+        # Default to Amazon unless unavailable, in which case fall back to cheapest trusted store
+        chosen = offers["amazon"] if "amazon" in offers else min(offers.values(), key=lambda o: o["price"])
 
     url = chosen["url"] if data["is_mock"] else direct_link(chosen["store"], chosen["title"], chosen["url"])
     _upsert_cart_item(data["product_id"], chosen["store"], chosen["title"], chosen["price"], url, qty)
-
     return {
-        "ok": True, "mode": mode, "product": data["name"],
+        "ok": True,
+        "mode": mode,
+        "product": data["name"],
         "store": STORE_LABELS.get(chosen["store"], chosen["store"]),
-        "price": chosen["price"], "qty": max(1, qty), "is_mock": data["is_mock"],
+        "price": chosen["price"],
+        "qty": max(1, qty),
+        "is_mock": data["is_mock"],
     }
 
 
 def add_offer(product_id: int, store: str, qty: int = 1) -> bool:
-    """Add one specific store's offer to the cart (used by the 'Add to cart' card button)."""
+    """Add a specific store card offer directly to the cart."""
     conn = get_conn()
     o = conn.execute("SELECT * FROM offers WHERE product_id = ? AND store = ?", (product_id, store)).fetchone()
     conn.close()
@@ -120,7 +136,6 @@ def clear_cart() -> None:
 
 
 def _find_amazon_asin_url(title: str) -> str | None:
-    """Fallback lookup using SerpApi Amazon engine to grab an exact /dp/<ASIN> link."""
     api_key = os.environ.get("SERPAPI_KEY")
     if not api_key or not title:
         return None
@@ -140,7 +155,7 @@ def _find_amazon_asin_url(title: str) -> str | None:
 
 
 def get_cart() -> dict:
-    """Cart grouped by store, with totals and (where possible) a one-click link."""
+    """Return cart grouped by store, totals, and Amazon's 1-click bulk add link."""
     conn = get_conn()
     rows = conn.execute(
         "SELECT c.*, p.name FROM cart_items c JOIN products p ON p.id = c.product_id ORDER BY c.store"
@@ -158,10 +173,8 @@ def get_cart() -> dict:
                 conn.execute("UPDATE cart_items SET url = ? WHERE product_id = ?", (url, r["product_id"]))
                 conn.commit()
 
-        grp = stores.setdefault(r["store"], {"label": STORE_LABELS.get(r["store"], r["store"]),
-                                             "items": [], "total": 0.0})
-        grp["items"].append({"name": r["name"], "title": r["title"], "price": r["price"],
-                             "qty": r["qty"], "url": url})
+        grp = stores.setdefault(r["store"], {"label": STORE_LABELS.get(r["store"], r["store"]), "items": [], "total": 0.0})
+        grp["items"].append({"name": r["name"], "title": r["title"], "price": r["price"], "qty": r["qty"], "url": url})
         grp["total"] += r["price"] * r["qty"]
 
     conn.close()

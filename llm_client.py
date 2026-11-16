@@ -1,5 +1,4 @@
-"""One shared text-model helper for modules that need a quick answer from the LLM
-(matching listings, fixing spelling, reading look descriptions)."""
+"""Shared Groq text-model helper used for product matching, query expansion, and looks."""
 import os
 import re
 import time
@@ -11,10 +10,10 @@ _llm = None
 
 
 def chat(prompt: str) -> str:
-    """Send a prompt to the Groq text model and return its answer without any <think> block."""
+    """Invoke the configured Groq text model and strip any <think> blocks."""
     global _llm
     if _llm is None:
-        from langchain_groq import ChatGroq  # imported lazily so this module always loads
+        from langchain_groq import ChatGroq
         _llm = ChatGroq(model=os.getenv("GROQ_TEXT_MODEL", "openai/gpt-oss-120b"), temperature=0)
 
     last_err = None
