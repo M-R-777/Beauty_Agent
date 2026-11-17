@@ -59,7 +59,7 @@ def _reddit_search(query: str, key: str, engine: str = "google") -> list[dict]:
 
 
 def reddit_reviews(product: str, limit: int = 8) -> dict:
-    """Search Reddit threads and comments mentioning a product."""
+    """Search Reddit threads and comments mentioning a product (max 2 API calls)."""
     key = os.environ.get("SERPAPI_KEY")
     if not key:
         return {"available": False, "reason": "Reddit reviews need SERPAPI_KEY in .env."}
@@ -67,36 +67,21 @@ def reddit_reviews(product: str, limit: int = 8) -> dict:
     threads: list[dict] = []
     seen: set[str] = set()
 
-    def add_results(query: str, engine: str = "google") -> str | None:
+    for q in (f"site:reddit.com {product}", f"{product} reddit India"):
         try:
-            items = _reddit_search(query, key, engine=engine)
+            items = _reddit_search(q, key, engine="google")
         except Exception as e:
-            return type(e).__name__
+            if not threads:
+                return {"available": False, "reason": f"Reddit search failed ({type(e).__name__})."}
+            break
         for t in items:
             if t["url"] not in seen:
                 seen.add(t["url"])
                 threads.append(t)
-        return None
-
-    for q in (f"site:reddit.com {product}", f"{product} reddit"):
-        err = add_results(q, engine="google")
-        if err:
-            return {"available": False, "reason": f"Reddit search failed ({err})."}
-        if len(threads) >= 4:
+        if len(threads) >= 3:
             break
 
-    if len(threads) < 3:
-        from price_sources import _alternatives
-        for alt in _alternatives(product):
-            add_results(f"site:reddit.com {alt}", engine="google")
-            if len(threads) >= 4:
-                break
-
-    if len(threads) < 3:
-        add_results(product, engine="google_forums")
-
     return {"available": True, "threads": threads[:limit]}
-
 
 # ---------------------------------------------------------------------------
 # YouTube (sponsored videos filtered out)
