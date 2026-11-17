@@ -13,19 +13,56 @@ import streamlit.components.v1 as components
 import cart
 import looks
 import price_sources
+import skin_quiz
 from price_sources import STORE_LABELS, get_offers, usable_url
 from setup_db import create_database
 from shopping_agent import REFUSAL, agent, is_beauty_shopping
 
-st.set_page_config(page_title="Beauty Shopping Assistant", page_icon="💄", layout="wide")
-create_database()  # safe to call every run; creates missing tables only
+st.set_page_config(page_title="Skipia.ai · Beauty Assistant", page_icon="💄", layout="wide")
+create_database()
+skin_quiz.ensure_profile_table()
+
+# Subtle frontend polish: cleaner card radius, refined spacing, and compact pills
+st.markdown(
+    """
+    <style>
+    .block-container { padding-top: 1.6rem; padding-bottom: 2.5rem; max-width: 1120px; }
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        border-radius: 14px !important;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"]:hover {
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+    }
+    .profile-pill {
+        background: rgba(255, 105, 180, 0.12);
+        border: 1px solid rgba(255, 105, 180, 0.35);
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-size: 0.86rem;
+        line-height: 1.45;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+WELCOME_MSG = (
+    "Hey there! ✨ I'm **Skipia**, your all-in-one skincare, haircare & makeup shopping bestie! 💖\n\n"
+    "Here's what we can do together:\n"
+    "- **Compare live prices** across Nykaa, Tira, Amazon, Myntra, Purplle & official brand sites\n"
+    "- **Check real, unsponsored reviews** from Reddit & YouTube before you buy\n"
+    "- **Build & customize a budget skincare routine** (take the **Skin Quiz** in the sidebar to start!)\n"
+    "- **Shop by photo** or import a creator's makeup look\n\n"
+    "What are we hunting for today? 🧴💄"
+)
 
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.session_state.messages = [{"role": "assistant", "content": WELCOME_MSG}]
 
 
 def scroll_to_bottom() -> None:
-    """Scroll the chat to the newest message (Streamlit has no built-in way to do this)."""
+    """Scroll the chat to the newest message."""
     components.html(
         """<script>
         const doc = window.parent.document;
@@ -42,7 +79,7 @@ def run_agent(skip_gate: bool = False) -> tuple[str, list[dict]]:
         return REFUSAL, []
 
     recent = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-8:]]
-    result = agent.invoke({"messages": recent})
+    result = agent.invoke({"messages": recent}, {"recursion_limit": 12})
     msgs = result["messages"]
 
     last_human = max((i for i, m in enumerate(msgs) if getattr(m, "type", "") == "human"), default=-1)
@@ -119,14 +156,27 @@ def render_cards(item: dict | str, key_prefix: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Sidebar: screen picker, cart toggle, shop by image
+# Sidebar: navigation, saved skin badge, cart toggle, shop by image
 # ---------------------------------------------------------------------------
 if "goto" in st.session_state:
     st.session_state["screen"] = st.session_state.pop("goto")
 
 with st.sidebar:
-    screen = st.radio("Screen", ["Chat", "Looks", "Cart"], horizontal=True, key="screen")
+    st.markdown("## 💄 Skipia.ai")
+    screen = st.radio("Navigate", ["Chat", "Skin Quiz", "Looks", "Cart"], horizontal=True, key="screen")
 
+    saved_profile = skin_quiz.get_skin_profile()
+    if saved_profile:
+        st.markdown(
+            f"<div class='profile-pill'>"
+            f"<b>🧬 Your Skin Profile</b><br>"
+            f"Type: <b>{saved_profile['skin_type']}</b> · Goal: {saved_profile['concern']}<br>"
+            f"Routine Budget: <b>₹{saved_profile['budget']:,}</b>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
     st.header("Cart mode")
     mode_label = st.radio(
         "Where should items go?",
@@ -164,13 +214,116 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------------------
+# Skin Quiz & Budget OTC Routine Builder screen
+# ---------------------------------------------------------------------------
+def show_skin_quiz() -> None:
+    st.title("🧬 Skin Type Quiz & Budget Routine Builder")
+    st.caption(
+        "Answer 5 quick questions to identify your skin type and build an over-the-counter (OTC) "
+        "skincare routine backed by Reddit reviews within your budget."
+    )
+
+    existing = skin_quiz.get_skin_profile()
+
+    with st.container(border=True):
+        q1 = st.radio(
+            "1. How does your bare skin feel 2 hours after washing (without moisturizer)?",
+            [
+                "Tight, dry, or slightly rough",
+                "Shiny all over (forehead, cheeks, and chin)",
+                "Shiny only in the T-zone (forehead/nose), normal or dry on cheeks",
+                "Comfortable, balanced, neither tight nor greasy",
+            ],
+        )
+        q2 = st.radio(
+            "2. By midday, how does your face typically look?",
+            [
+                "Whole face looks greasy or dewy with visible pores",
+                "Forehead & nose get shiny, cheeks stay matte",
+                "Dull, dry, or occasionally flaky patches",
+                "Even and comfortable throughout the day",
+            ],
+        )
+        q3 = st.radio(
+            "3. How often do you experience clogged pores or occasional breakouts?",
+            [
+                "Frequently (especially around T-zone or jawline)",
+                "Occasionally (around weather changes or stress)",
+                "Rarely or almost never",
+            ],
+        )
+        q4 = st.radio(
+            "4. How does your skin react to new skincare products or fragrance?",
+            [
+                "Easily turns red, stings, or feels irritated",
+                "Sometimes reacts to strong actives",
+                "Rarely reacts; tolerates most OTC products well",
+            ],
+        )
+
+        c1, c2 = st.columns(2)
+        with c1:
+            concern = st.selectbox(
+                "5. Primary cosmetic skincare goal",
+                [
+                    "Oil control & clogged pores",
+                    "Deep hydration & barrier support",
+                    "Brightening & uneven skin tone",
+                    "Simple daily maintenance & sun protection",
+                ],
+            )
+        with c2:
+            budget = st.slider(
+                "6. Total routine budget (₹)",
+                min_value=800,
+                max_value=5000,
+                value=existing["budget"] if existing else 1500,
+                step=100,
+            )
+
+        if st.button("Save Skin Profile", type="primary", use_container_width=True):
+            profile = skin_quiz.evaluate_skin_quiz(q1, q2, q3, q4, concern, budget)
+            st.success(f"Saved! Your evaluated skin type is **{profile['skin_type']}** (Budget: **₹{profile['budget']:,}**).")
+            st.rerun()
+
+    profile = skin_quiz.get_skin_profile()
+    if profile:
+        st.divider()
+        with st.container(border=True):
+            st.subheader(f"Your Saved Result: {profile['skin_type']} Skin")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Skin Type", profile["skin_type"])
+            m2.metric("Primary Goal", profile["concern"].split("&")[0].strip())
+            m3.metric("Max Budget", f"₹{profile['budget']:,}")
+            st.caption(f"Sensitivity preference: {profile['sensitivity']} · OTC cosmetic products only.")
+
+            b1, b2 = st.columns([3, 1])
+            with b1:
+                if st.button("✨ Build My Budget Routine (Reddit Backed)", type="primary", use_container_width=True):
+                    prompt = (
+                        f"Build a 3-step over-the-counter (OTC) daily skincare routine "
+                        f"(cleanser, moisturizer, sunscreen) for my saved skin profile "
+                        f"({profile['skin_type']} skin, goal: {profile['concern']}, sensitivity: {profile['sensitivity']}) "
+                        f"under ₹{profile['budget']}. Check Reddit reviews once and compare real prices across trusted stores."
+                    )
+                    st.session_state.messages.append({"role": "user", "content": prompt})
+                    st.session_state.pending_prompt = True
+                    st.session_state.goto = "Chat"
+                    st.rerun()
+            with b2:
+                if st.button("🗑️ Delete Skin Type", use_container_width=True):
+                    skin_quiz.delete_skin_profile()
+                    st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Cart screen
 # ---------------------------------------------------------------------------
 def show_cart() -> None:
     st.title("🛍️ Your carts")
     data = cart.get_cart()
     if not data["stores"]:
-        st.info("Your cart is empty. Ask the assistant to add something.")
+        st.info("Your cart is empty. Ask Skipia to add something!")
         return
 
     for store, group in data["stores"].items():
@@ -198,7 +351,7 @@ def show_cart() -> None:
 # ---------------------------------------------------------------------------
 def show_looks() -> None:
     st.title("🎨 Looks")
-    st.caption("Drop a makeup video link and I'll pull out the products used. Save it, then add the whole look to your cart.")
+    st.caption("Drop a makeup video link and Skipia will pull out the products used. Save it, then add the whole look to your cart.")
 
     with st.container(border=True):
         url = st.text_input("YouTube link (video or Short)", placeholder="https://www.youtube.com/watch?v=...")
@@ -215,7 +368,7 @@ def show_looks() -> None:
                 if not res["ok"]:
                     st.error(res["error"])
                 elif res["count"] == 0:
-                    st.warning("Saved the look, but I couldn't find any products in the description or "
+                    st.warning("Saved the look, but couldn't find any products in the description or "
                                "transcript. Open 'Edit' on it below to add them by hand.")
                 else:
                     st.success(f"Saved a look with {res['count']} products (found in: {res['source']}).")
@@ -277,8 +430,8 @@ def show_looks() -> None:
 # Chat screen
 # ---------------------------------------------------------------------------
 def show_chat() -> None:
-    st.title("💄 Beauty Shopping Assistant")
-    st.caption("Skincare, haircare and makeup: compare prices across apps and build your cart.")
+    st.title("💄 Skipia.ai")
+    st.caption("Your AI beauty & skincare shopping assistant · Compare prices across trusted apps, build budget routines, and fill your cart.")
 
     for idx, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
@@ -292,7 +445,7 @@ def show_chat() -> None:
 
     if st.session_state.get("pending_image") or st.session_state.get("pending_prompt"):
         with st.chat_message("assistant"):
-            with st.spinner("Comparing prices…"):
+            with st.spinner("Researching reviews & comparing live prices…"):
                 response, products = run_agent(skip_gate=True)
         st.session_state.messages.append({"role": "assistant", "content": response, "products": products})
         st.session_state.scroll = True
@@ -300,7 +453,7 @@ def show_chat() -> None:
         st.session_state.pop("pending_prompt", None)
         st.rerun()
 
-    if prompt := st.chat_input("e.g. Compare Maybelline Fit Me foundation across apps"):
+    if prompt := st.chat_input("Ask Skipia to compare prices, check reviews, or build your routine..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
@@ -318,6 +471,8 @@ def show_chat() -> None:
 
 if screen == "Cart":
     show_cart()
+elif screen == "Skin Quiz":
+    show_skin_quiz()
 elif screen == "Looks":
     show_looks()
 else:

@@ -149,7 +149,6 @@ def _is_official_brand_source(source: str, query: str) -> bool:
         if brand in q_low and (dom.split(".")[0] in s_clean or re.sub(r"[^a-z0-9]", "", brand) in s_clean):
             return True
 
-    # Also match if any significant brand word from the query is directly in the domain/seller name
     stop = {"the", "for", "and", "with", "serum", "cream", "cleanser", "wash", "face", "gel", "oil", "lip", "tint"}
     brand_tokens = [w for w in re.findall(r"[a-z]{4,}", q_low) if w not in stop][:2]
     return any(tok in s_clean for tok in brand_tokens)
@@ -610,23 +609,15 @@ def get_offers(query: str, force_refresh: bool = False, product_type: str = "", 
             except Exception as e:
                 _t(f"Trusted web search failed: {_describe_error(e)}")
 
-        # If a specific store was requested (or single-app mode is active) and still missing, search that site directly
-        stores_to_check = set()
-        if target and target not in best:
-            stores_to_check.add(target)
-        for must_store in ("nykaa", "tira", "amazon"):
-            if len(best) < TOP_N and must_store not in best:
-                stores_to_check.add(must_store)
-
-        if not is_mock:
-            for st in list(stores_to_check)[:2]:
-                found_item = _fetch_store_specific(name, st)
-                if found_item:
-                    _t(f"Direct {STORE_LABELS.get(st, st)} lookup found ₹{found_item['price']:,.0f}")
-                    best[st] = found_item
-                    if not match_title:
-                        match_title = found_item["title"]
-                        exact_flag = 1
+        # Only run a targeted site: search when a specific store was explicitly requested
+        if target and target not in best and target in STORE_DOMAINS and not is_mock:
+            found_item = _fetch_store_specific(name, target)
+            if found_item:
+                _t(f"Direct {STORE_LABELS.get(target, target)} lookup found ₹{found_item['price']:,.0f}")
+                best[target] = found_item
+                if not match_title:
+                    match_title = found_item["title"]
+                    exact_flag = 1
 
         if best and not is_mock:
             en_titles = [v["title"] for v in best.values() if v.get("title") and not _is_hindi(v["title"])]

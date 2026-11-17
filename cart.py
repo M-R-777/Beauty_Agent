@@ -181,7 +181,7 @@ def get_cart() -> dict:
 
     amazon = stores.get("amazon")
     if amazon:
-        parts = ["AssociateTag=beautyshop-21"]
+        parts = ["AssociateTag=skipia-21"]
         count = 0
         for item in amazon["items"]:
             m = ASIN_RE.search(item["url"] or "")

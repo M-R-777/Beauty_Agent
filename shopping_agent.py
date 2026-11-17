@@ -14,6 +14,7 @@ from langchain_groq import ChatGroq
 
 import cart
 import reviews
+import skin_quiz
 from price_sources import STORE_LABELS, get_offers_with_fallback
 
 load_dotenv()
@@ -22,13 +23,13 @@ TEXT_MODEL = os.getenv("GROQ_TEXT_MODEL", "openai/gpt-oss-120b")
 VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
-llm = ChatGroq(model=TEXT_MODEL, temperature=0)
+llm = ChatGroq(model=TEXT_MODEL, temperature=0.3)
 vision_llm = ChatGroq(model=VISION_MODEL, temperature=0)
 
-SCOPE = ("skincare, haircare, makeup, fragrance, body care, bath products, nail care, grooming "
-         "(trimmers, razors, epilators, hair dryers, straighteners) and feminine hygiene")
-REFUSAL = ("I can only help with shopping for beauty and personal-care products: skincare, haircare, "
-           "makeup, fragrance, body care and grooming.")
+SCOPE = ("over-the-counter (OTC) cosmetic skincare, haircare, makeup, fragrance, body care, bath products, "
+         "nail care, grooming (trimmers, razors, epilators, hair dryers, straighteners) and feminine hygiene")
+REFUSAL = ("Aww, I'd love to help, but I'm strictly your beauty & personal-care shopping bestie! ✨ "
+           "Ask me about skincare routines, makeup, haircare, reviews, or finding the best prices across Nykaa, Tira, and Amazon.")
 ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
@@ -36,15 +37,16 @@ ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 # 1. Domain Guardrail Gate
 # ---------------------------------------------------------------------------
 GATE_PROMPT = (
-    "You are a topic classifier for an Indian beauty & personal-care shopping assistant (Nykaa/Tira/Amazon).\n"
-    f"IN SCOPE: {SCOPE}, beauty tools, and cart actions.\n"
-    "Judge the LAST user message using prior context for short follow-ups ('add it', 'yes', 'check tira').\n"
+    "You are a topic classifier for an Indian OTC beauty & personal-care shopping assistant (Nykaa/Tira/Amazon).\n"
+    f"IN SCOPE: {SCOPE}, skin-type routines, swapping/adding/removing routine steps, beauty tools, greetings, and cart actions.\n"
+    "OUT OF SCOPE: prescription medicines, dermatological ointments/steroids, oral pills/supplements, or non-beauty topics.\n"
+    "Judge the LAST user message using prior context for short follow-ups ('hi', 'add a serum', 'swap the sunscreen', 'remove that').\n"
     "Answer with one word only: ALLOW or BLOCK.\n\n"
 )
 
 
 def is_beauty_shopping(messages: list[dict]) -> bool:
-    """Verify the user's message is within the beauty/personal-care shopping domain."""
+    """Verify the user's message is within the OTC beauty/personal-care shopping domain."""
     convo = "\n".join(f"{m['role']}: {m['content'][:300]}" for m in messages[-4:])
     try:
         out = llm.invoke(GATE_PROMPT + f"Conversation:\n{convo}").content
@@ -58,10 +60,18 @@ def is_beauty_shopping(messages: list[dict]) -> bool:
 # 2. Agent Tools
 # ---------------------------------------------------------------------------
 @tool
+def get_skin_profile() -> str:
+    """Read the user's saved skin type, sensitivity level, primary skincare goal, and routine budget (in ₹)."""
+    profile = skin_quiz.get_skin_profile()
+    if not profile:
+        return json.dumps({"has_profile": False, "message": "User has not completed the Skin Quiz tab yet."})
+    return json.dumps({"has_profile": True, **profile})
+
+
+@tool
 def compare_prices(product: str, product_type: str = "", store: str = "") -> str:
     """Compare prices of a beauty product across trusted Indian stores (or check one specific store if named)."""
     query = product.strip()
-    # Avoid appending generic category words like 'Skincare' that hurt exact search queries
     if product_type and product_type.lower() not in ("skincare", "makeup", "haircare", "beauty", "cosmetics"):
         if product_type.lower() not in query.lower():
             query = f"{query} {product_type.strip()}"
@@ -174,23 +184,40 @@ def describe_product_image(image_path: str) -> str:
 # ---------------------------------------------------------------------------
 agent = create_agent(
     tools=[
-        compare_prices, add_to_cart, remove_from_cart, view_cart,
-        get_reddit_reviews, get_youtube_reviews, describe_product_image,
+        get_skin_profile, compare_prices, add_to_cart, remove_from_cart,
+        view_cart, get_reddit_reviews, get_youtube_reviews, describe_product_image,
     ],
     model=llm,
     system_prompt=(
-        f"You are a shopping assistant for beauty and personal-care products ({SCOPE}) in India (prices in ₹).\n\n"
-        f'SCOPE: Only assist with beauty/personal-care shopping. For anything else reply only with: "{REFUSAL}"\n\n'
-        "PRICES: Call compare_prices. If the user asks about a specific app/store (like Nykaa or Tira), pass "
-        "that store name in the store argument. Product cards appear under your reply, so do NOT list stores or "
-        "prices—write at most 2 short sentences stating the cheapest store and savings (or the selected store's price). "
-        "If exact_match is false, mention closest_match. If offers is empty, say no trusted stores list it right now.\n\n"
-        "REVIEWS: Call get_reddit_reviews and/or get_youtube_reviews. Summarize pros, cons, and user consensus "
+        f"You are Skipia (Skipia.ai), a warm, upbeat, and helpful beauty & skincare shopping bestie for India ({SCOPE}, prices in ₹).\n\n"
+        "TONE & PERSONALITY:\n"
+        "- Sound friendly, natural, and encouraging—like a knowledgeable friend who loves skincare and saving money (use light, tasteful emojis like ✨, 🧴, 💖).\n"
+        "- If the user simply greets you ('hi', 'hello', 'hey'), welcome them warmly as their all-in-one skincare, makeup & haircare shopping assistant and mention they can compare prices, check Reddit/YouTube reviews, or take the Skin Quiz.\n"
+        "- Keep replies concise and easy to scan—never ramble.\n\n"
+        f'SCOPE & SAFETY: Only recommend everyday cosmetic OTC products (cleansers, toners/serums, moisturizers, sunscreens, hair/makeup items). '
+        f'NEVER recommend prescription medications, medicated dermatological ointments/steroids, or oral supplements/tablets. '
+        f'For out-of-scope requests reply only with: "{REFUSAL}"\n\n'
+        "SKIN ROUTINES & BUDGET PLANNING:\n"
+        "- Call get_skin_profile first, then call get_reddit_reviews ONCE for '<skin_type> skincare routine IndianSkincareAddicts'.\n"
+        "- Do NOT call get_youtube_reviews during routine building.\n"
+        "- Choose 3 budget-conscious, well-known Indian OTC products upfront (1. Cleanser, 2. Moisturizer, 3. Sunscreen) "
+        "whose combined price comfortably fits under the user's budget, and call compare_prices ONCE per product (3 calls max, no swaps/retries).\n"
+        "- Present each step warmly, why Reddit loves it, its lowest price, and the total routine cost vs. budget.\n\n"
+        "ROUTINE CUSTOMIZATION IN CHAT (SWAPS, ADDITIONS & REMOVALS):\n"
+        "- When the user asks to swap a routine product (e.g., 'that sunscreen clogs my pores, suggest something in the same budget'), "
+        "add a step (e.g., 'what if I want to add a serum?'), or remove a step from the routine discussed in recent messages:\n"
+        "  1. Keep all unchanged steps and their prices from the conversation—do NOT re-search products that were already priced.\n"
+        "  2. Respect the user's constraint (e.g., non-comedogenic/gel texture, same price range, or remaining budget from get_skin_profile).\n"
+        "  3. Call compare_prices ONLY ONCE for the new/replacement OTC product.\n"
+        "  4. Show the updated routine list, the new product's price, and the recalculated total vs. their budget (and offer to add it to cart).\n\n"
+        "PRICES: Call compare_prices. If the user asks about a specific app/store (like Nykaa or Tira), pass that store name. "
+        "Product cards appear under your reply, so for single-product lookups write 1–2 friendly sentences highlighting the best deal and savings. "
+        "If exact_match is false, mention closest_match.\n\n"
+        "REVIEWS: Call get_reddit_reviews and/or get_youtube_reviews. Summarize pros, cons, and the real user consensus in a friendly, honest tone "
         "with clickable Markdown links like [Title](https://...). Mention skipped sponsored videos.\n\n"
         "IMAGES: Call describe_product_image, then compare_prices using its search_query.\n\n"
-        "CART: Call add_to_cart when requested. If the user specifies an app (e.g. 'add to Nykaa' or 'add to Amazon'), "
-        "pass store='nykaa' / store='amazon'; if they don't specify an app, leave store empty so it defaults to Amazon. "
-        "Report which store it went to and the price. You can NEVER place an order or pay. Never add to cart unless asked.\n\n"
+        "CART: Call add_to_cart when requested. If the user specifies an app, pass store='nykaa'/'tira'/'amazon'; otherwise leave "
+        "store empty so it defaults to Amazon. Confirm warmly which store it went to and the price. You can NEVER place an order or pay.\n\n"
         "Use plain text and Markdown links only: no tables, HTML tags, or code blocks."
     ),
 )
