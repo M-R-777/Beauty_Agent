@@ -1,85 +1,81 @@
-"""Fetch and match live product prices across trusted Indian beauty retailers & official brand websites.
-
-Trusted retailers:
-  Amazon, Tira, Nykaa, Ajio, Purplle, Instagram, Blinkit, Myntra, BigBasket
-  + the product's own official brand website (e.g., beminimalist.co, dotandkey.com).
-"""
+"""Fast, Google-accurate live price fetcher across Nykaa, Amazon, Tira, Purplle, Blinkit, Myntra & Ajio."""
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
-import json
 import os
 import re
 import time
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 import requests
 
-import llm_client
 from setup_db import get_conn
 
 TOP_N = 3
 CACHE_SECONDS = 12 * 3600
-ERROR_CACHE_SECONDS = 60
+ERROR_CACHE_SECONDS = 30
 SERP_URL = "https://serpapi.com/search.json"
 HINDI_RE = re.compile(r"[\u0900-\u097F]")
 
-# Strictly trusted platforms (no Flipkart, Meesho, or third-party price aggregators)
 TRUSTED_ALIASES = {
     "amazon": "amazon",
     "tira": "tira",
     "nykaa": "nykaa",
-    "ajio": "ajio",
     "purplle": "purplle",
-    "instagram": "instagram",
     "blinkit": "blinkit",
     "myntra": "myntra",
+    "ajio": "ajio",
     "big basket": "bigbasket",
     "bigbasket": "bigbasket",
+    "instagram": "instagram",
 }
+
 STORE_LABELS = {
     "amazon": "Amazon",
     "tira": "Tira",
     "nykaa": "Nykaa",
-    "ajio": "Ajio",
     "purplle": "Purplle",
-    "instagram": "Instagram",
     "blinkit": "Blinkit",
     "myntra": "Myntra",
+    "ajio": "Ajio",
     "bigbasket": "BigBasket",
+    "instagram": "Instagram",
 }
+
 STORE_DOMAINS = {
     "amazon": "amazon.in",
     "tira": "tirabeauty.com",
     "nykaa": "nykaa.com",
-    "ajio": "ajio.com",
     "purplle": "purplle.com",
-    "instagram": "instagram.com",
     "blinkit": "blinkit.com",
     "myntra": "myntra.com",
+    "ajio": "ajio.com",
     "bigbasket": "bigbasket.com",
+    "instagram": "instagram.com",
 }
+
 STORE_SEARCH = {
     "amazon": "https://www.amazon.in/s?k={q}",
     "tira": "https://www.tirabeauty.com/products/?q={q}",
     "nykaa": "https://www.nykaa.com/search/result/?q={q}",
-    "ajio": "https://www.ajio.com/search/?text={q}",
     "purplle": "https://www.purplle.com/search?q={q}",
-    "instagram": "https://www.instagram.com/explore/tags/{q}/",
     "blinkit": "https://blinkit.com/s/?q={q}",
     "myntra": "https://www.myntra.com/{q}",
+    "ajio": "https://www.ajio.com/search/?text={q}",
     "bigbasket": "https://www.bigbasket.com/ps/?q={q}",
+    "instagram": "https://www.instagram.com/explore/tags/{q}/",
 }
+
 PRODUCT_PATTERNS = {
     "amazon": "/dp/",
     "tira": "/product/",
     "nykaa": "/p/",
-    "ajio": "/p/",
     "purplle": "/product/",
     "blinkit": "/prn/",
     "myntra": "/buy",
+    "ajio": "/p/",
     "bigbasket": "/pd/",
 }
 
-# Known Indian/global beauty brand official domains
 BRAND_OFFICIAL_DOMAINS = {
     "minimalist": "beminimalist.co",
     "dot & key": "dotandkey.com",
@@ -113,7 +109,27 @@ BLOCKED_DOMAINS = (
     "flipkart.", "meesho.", "snapdeal.", "shopclues.", "paytm", "indiamart.",
     "tradeindia.", "buyhatke.", "mysmartprice.", "pricehistory.", "smartprix.",
     "desidime.", "coupondunia.", "grabon.", "cashkaro.", "ebay.", "jiomart.",
+    "gosupps.", "desertcart.", "ubuy.", "nailinfinity.", "sweetcare.", "lojaglamourosa.",
 )
+
+EXCLUSIVE_FORMS = {
+    "shampoo": {"conditioner", "mask", "masque", "serum", "oil"},
+    "conditioner": {"shampoo", "mask", "masque", "serum", "oil"},
+    "mask": {"shampoo", "conditioner", "cleanser", "toner"},
+    "serum": {"cleanser", "shampoo", "conditioner", "sunscreen"},
+    "cleanser": {"serum", "moisturizer", "moisturiser", "sunscreen", "toner"},
+    "moisturizer": {"cleanser", "shampoo", "sunscreen"},
+    "sunscreen": {"cleanser", "shampoo", "conditioner"},
+    "toner": {"cleanser", "moisturizer", "moisturiser", "sunscreen", "shampoo"},
+}
+
+EXCLUSIVE_ACTIVES = {
+    "niacinamide", "vitamin", "salicylic", "hyaluronic", "retinol",
+    "glycolic", "kojic", "alpha", "azelaic", "peptide", "ceramide", "squalane",
+}
+
+STOP_WORDS = {"the", "for", "and", "with", "paris", "india", "skin", "face", "hair", "body", "buy", "online", "milano"}
+BAD_PAGE_TITLES = ("please enable javascript", "access denied", "just a moment", "robot check", "captcha")
 
 TRACE: dict[str, list[str]] = {}
 _CURRENT: list[str] = []
@@ -129,8 +145,15 @@ def _is_hindi(text: str | None) -> bool:
     return bool(text and HINDI_RE.search(text))
 
 
+def _norm(text: str) -> str:
+    t = text.lower().replace("é", "e").replace("è", "e").replace("’", "").replace("'", "")
+    t = t.replace("moisturiser", "moisturizer").replace("face wash", "cleanser").replace("facewash", "cleanser")
+    t = t.replace("lip gloss", "lipgloss").replace("toning solution", "toner").replace("toning", "toner")
+    return re.sub(r"\s+", " ", t).strip()
+
+
 def _expand_abbreviations(query: str) -> str:
-    q = query.strip()
+    q = _norm(query)
     q = re.sub(r"\bvit\.?\s*([a-z0-9]+)\b", r"vitamin \1", q, flags=re.I)
     q = re.sub(r"\bboj\b", "beauty of joseon", q, flags=re.I)
     q = re.sub(r"\blrp\b", "la roche posay", q, flags=re.I)
@@ -138,46 +161,44 @@ def _expand_abbreviations(query: str) -> str:
     return re.sub(r"\s+", " ", q).strip()
 
 
+def _clean_query(query: str) -> str:
+    q = re.sub(r"^the\s+", "", _expand_abbreviations(query))
+    q = re.sub(r"\b\d+(?:\.\d+)?\s*(?:ml|g|gm|gms|oz|l)\b", "", q, flags=re.I)
+    seen, out = set(), []
+    for w in q.split():
+        if w not in seen:
+            seen.add(w)
+            out.append(w)
+    return " ".join(out) or q
+
+
 def _is_official_brand_source(source: str, query: str) -> bool:
-    """Check if the seller/domain is the official website of the brand being searched."""
-    s_clean = re.sub(r"[^a-z0-9]", "", source.lower())
-    q_low = query.lower()
+    s_clean = re.sub(r"[^a-z0-9]", "", _norm(source))
+    q_low = _norm(query)
     if any(bad.rstrip(".") in s_clean for bad in BLOCKED_DOMAINS):
         return False
-
     for brand, dom in BRAND_OFFICIAL_DOMAINS.items():
         if brand in q_low and (dom.split(".")[0] in s_clean or re.sub(r"[^a-z0-9]", "", brand) in s_clean):
             return True
-
-    stop = {"the", "for", "and", "with", "serum", "cream", "cleanser", "wash", "face", "gel", "oil", "lip", "tint"}
-    brand_tokens = [w for w in re.findall(r"[a-z]{4,}", q_low) if w not in stop][:2]
-    return any(tok in s_clean for tok in brand_tokens)
+    return False
 
 
 def normalize_store(source: str | None, query: str = "") -> str | None:
-    """Return store key ONLY if it is one of the 9 trusted apps or the official brand website."""
     raw = (source or "").strip()
     if not raw:
         return None
-    s = raw.lower()
+    s = _norm(raw)
     if any(bad.rstrip(".") in s for bad in BLOCKED_DOMAINS):
         return None
-
     for alias, key in TRUSTED_ALIASES.items():
         if alias in s:
             return key
-
     if query and _is_official_brand_source(raw, query):
-        clean = re.sub(r"^www\.", "", s)
-        clean = re.sub(r"\.(com|in|co\.in|co|org|net|shop|store)$", "", clean)
+        clean = re.sub(r"^www\.|\.(com|in|co\.in|co|org|net|shop|store)$", "", s)
         slug = re.sub(r"[^a-z0-9]+", "", clean)
         if slug:
-            label = re.sub(r"\.(com|in|co\.in|co|org|net)$", "", raw, flags=re.I).strip()
-            if label.islower():
-                label = label.title()
-            STORE_LABELS.setdefault(slug, f"{label} (Official)")
+            STORE_LABELS.setdefault(slug, f"{clean.title()} (Official)")
             return slug
-
     return None
 
 
@@ -190,7 +211,7 @@ def _num(value) -> float | None:
     return float(m.group().replace(",", "")) if m else None
 
 
-def _serp_get(params: dict, timeout: int = 30) -> dict:
+def _serp_get(params: dict, timeout: int = 12) -> dict:
     resp = requests.get(
         SERP_URL,
         params={**params, "api_key": os.environ["SERPAPI_KEY"]},
@@ -207,124 +228,212 @@ def _describe_error(e: Exception) -> str:
             detail = e.response.json().get("error", "")
         except Exception:
             pass
-        return f"SerpApi returned HTTP {e.response.status_code}. {detail}".strip()
+        return f"SerpApi HTTP {e.response.status_code}: {detail}".strip()
     if isinstance(e, KeyError):
-        return "SERPAPI_KEY was not found. Check your .env file and restart Streamlit."
-    if isinstance(e, requests.ConnectionError):
-        return "Could not reach serpapi.com. Check your internet connection."
-    if isinstance(e, requests.Timeout):
-        return "SerpApi took too long to answer. Try again."
-    key = os.environ.get("SERPAPI_KEY", "\0")
-    return f"{type(e).__name__}: {str(e).replace(key, '***')[:120]}"
+        return "SERPAPI_KEY was not found in .env."
+    return f"{type(e).__name__}: {str(e)[:120]}"
 
 
-# ---------------------------------------------------------------------------
-# Search fetchers (Google Shopping + Targeted Trusted Store Search)
-# ---------------------------------------------------------------------------
-def _fetch_live(query: str) -> list[dict]:
-    body = _serp_get({
-        "engine": "google_shopping", "q": query,
-        "gl": "in", "hl": "en", "google_domain": "google.co.in",
-    })
-    err = body.get("error") or ""
-    if err and not body.get("shopping_results"):
-        if "hasn't returned any results" in err or "no results" in err.lower():
-            return []
-        raise RuntimeError(err)
+def _real_url(res: dict) -> str:
+    link = res.get("link") or ""
+    if "google.com/goto" in link or "google.com/url" in link:
+        qs = parse_qs(urlparse(link).query)
+        target = (qs.get("url") or qs.get("q") or [""])[0]
+        if target.startswith("http"):
+            return target
+    return link
 
-    listings = []
-    for item in body.get("shopping_results", []):
-        if item.get("title"):
-            src = item.get("source")
-            listings.append({
-                "store": normalize_store(src, query),
-                "source": src,
-                "title": item.get("title"),
-                "price": _num(item.get("extracted_price")) or _num(item.get("price")),
-                "url": item.get("link") or item.get("product_link"),
-                "delivery": item.get("delivery"),
-                "thumbnail": item.get("thumbnail"),
-                "token": item.get("immersive_product_page_token"),
-            })
-    return listings
 
+def _matches_product(title: str, query: str) -> bool:
+    t_norm = _norm(title)
+    if not t_norm or any(bad in t_norm for bad in BAD_PAGE_TITLES):
+        return False
+    if re.search(r"\b(combo|pack\s*of\s*\d|set\s*of\s*\d|kit|duo|trio)\b", t_norm):
+        return False
+
+    q_words = [w for w in re.findall(r"[a-z0-9]+", _clean_query(query)) if len(w) >= 2 and w not in STOP_WORDS]
+    if not q_words:
+        return True
+
+    t_words = set(re.findall(r"[a-z0-9]+", t_norm))
+    q_set = set(q_words)
+
+    # 1. Never mix product forms (e.g., shampoo vs serum)
+    banned = set()
+    for form, others in EXCLUSIVE_FORMS.items():
+        if form in q_set:
+            banned.update(others)
+    banned -= q_set
+    if banned and (t_words & banned) and not (t_words & (q_set & set(EXCLUSIVE_FORMS.keys()))):
+        return False
+
+    # 2. Never mix key active ingredients (e.g., Niacinamide vs Vitamin C)
+    q_actives = q_set & EXCLUSIVE_ACTIVES
+    if q_actives and not (q_actives <= t_words):
+        return False
+
+    # 3. Brand (first word) must match
+    if q_words[0] not in t_words and q_words[0] not in t_norm:
+        return False
+
+    # 4. Require all non-numeric descriptor words (ignore percentages like "10%" when counting)
+    descriptors = [w for w in q_words[1:] if not w.isdigit()]
+    if not descriptors:
+        return True
+    hits = sum(1 for w in descriptors if w in t_words or w in t_norm)
+    needed = len(descriptors) if len(descriptors) <= 2 else len(descriptors) - 1
+    return hits >= needed
 
 def _extract_web_price(res: dict) -> float | None:
     rich = res.get("rich_snippet") or {}
     price = (
         _num(((rich.get("top") or {}).get("detected_extensions") or {}).get("price"))
         or _num(((rich.get("bottom") or {}).get("detected_extensions") or {}).get("price"))
+        or _num(res.get("price"))
     )
     if not price:
         text = f"{res.get('title', '')} {res.get('snippet', '')}"
         m = re.search(r"(?:₹|Rs\.?|INR)\s*([\d,]+(?:\.\d+)?)", text, re.I)
         price = _num(m.group(1)) if m else None
-    return price if (price and price > 0) else None
+    return price if (price and 25 <= price <= 50000) else None
 
 
-def _fetch_store_specific(query: str, store: str) -> dict | None:
-    """Run a targeted site: search on a specific trusted store (e.g., Tira or Nykaa)."""
-    domain = STORE_DOMAINS.get(store)
-    if not domain:
-        return None
+# ---------------------------------------------------------------------------
+# Fast Parallel Google Shopping + Google Search + Immersive Store Expansion
+# ---------------------------------------------------------------------------
+def _fetch_google_shopping(query: str) -> tuple[list[dict], list[str], str | None]:
+    try:
+        body = _serp_get({
+            "engine": "google_shopping",
+            "q": query,
+            "location": "India",
+            "gl": "in",
+            "hl": "en",
+            "google_domain": "google.co.in",
+            "num": 40,
+        })
+    except Exception as e:
+        return [], [], _describe_error(e)
+
+    err = body.get("error") or ""
+    raw = body.get("shopping_results", []) + body.get("inline_shopping_results", [])
+    if err and not raw:
+        if "hasn't returned any results" in err.lower() or "no results" in err.lower():
+            return [], [], None
+        return [], [], err
+
+    listings, tokens, fallback_thumb = [], [], None
+    for item in raw:
+        title = item.get("title") or ""
+        if not _matches_product(title, query):
+            continue
+        if not fallback_thumb and item.get("thumbnail"):
+            fallback_thumb = item.get("thumbnail")
+
+        store = normalize_store(item.get("source"), query)
+        price = _num(item.get("extracted_price")) or _num(item.get("price"))
+        if store and price and price > 0:
+            listings.append({
+                "store": store,
+                "title": title,
+                "price": price,
+                "url": item.get("product_link") or item.get("link"),
+                "delivery": item.get("delivery"),
+                "thumbnail": item.get("thumbnail"),
+            })
+    return listings, tokens[:2], None
+
+
+def _fetch_immersive_stores(token: str, query: str) -> list[dict]:
+    try:
+        body = _serp_get({
+            "engine": "google_immersive_product",
+            "page_token": token,
+            "more_stores": "true",
+            "hl": "en",
+            "gl": "in",
+        }, timeout=12)
+    except Exception:
+        return []
+
+    pr = body.get("product_results") or {}
+    canonical = pr.get("title") or ""
+    if canonical and not _matches_product(canonical, query):
+        return []
+
+    thumbs = pr.get("thumbnails") or []
+    thumb = thumbs[0] if thumbs else None
+    out = []
+    for st in (pr.get("stores") or []) + (pr.get("online_sellers") or []):
+        store = normalize_store(st.get("name") or st.get("source"), query)
+        price = _num(st.get("extracted_price")) or _num(st.get("price"))
+        if store and price and price > 0:
+            out.append({
+                "store": store,
+                "title": st.get("title") or canonical or query.title(),
+                "price": price,
+                "url": st.get("link"),
+                "delivery": st.get("shipping"),
+                "thumbnail": thumb,
+            })
+    return out
+
+
+def _fetch_google_search(query: str, target_store: str | None = None) -> list[dict]:
+    site_filter = (
+        f"site:{STORE_DOMAINS[target_store]}"
+        if (target_store and target_store in STORE_DOMAINS)
+        else "(site:nykaa.com OR site:amazon.in OR site:tirabeauty.com OR site:purplle.com OR site:blinkit.com OR site:myntra.com)"
+    )
     try:
         body = _serp_get({
             "engine": "google",
-            "q": f"{query} site:{domain}",
-            "gl": "in", "hl": "en", "google_domain": "google.co.in",
+            "q": f"{query} price {site_filter}",
+            "location": "India",
+            "gl": "in",
+            "hl": "en",
+            "google_domain": "google.co.in",
+            "num": 20,
         })
     except Exception:
-        return None
+        return []
 
-    pattern = PRODUCT_PATTERNS.get(store, "")
-    fallback_item = None
+    listings = []
+    for item in body.get("shopping_results", []) + body.get("inline_shopping_results", []):
+        title = item.get("title") or ""
+        store = normalize_store(item.get("source"), query)
+        price = _num(item.get("extracted_price")) or _num(item.get("price"))
+        if store and price and price > 0 and _matches_product(title, query):
+            listings.append({
+                "store": store,
+                "title": title,
+                "price": price,
+                "url": item.get("link") or item.get("product_link"),
+                "delivery": item.get("delivery"),
+                "thumbnail": item.get("thumbnail"),
+            })
+
     for res in body.get("organic_results", []):
-        link = res.get("link") or ""
-        if domain not in link:
-            continue
-        price = _extract_web_price(res)
-        if not price:
+        link = _real_url(res)
+        hint = f"{urlparse(link).netloc} {res.get('displayed_link', '')} {res.get('source', '')}"
+        store = normalize_store(hint, query)
+        if not store:
             continue
         clean_title = re.sub(
-            r"\s*[-|:]\s*(Buy Online.*|Nykaa|Tira|Amazon\.in|Myntra|Purplle|Ajio).*$",
-            "", res.get("title") or query.title(), flags=re.I,
+            r"\s*[-|:]\s*(Buy Online.*|Nykaa|Tira|Amazon\.in|Myntra|Purplle|Ajio|Blinkit).*$",
+            "", res.get("title") or "", flags=re.I,
         ).strip()
-        item = {
-            "store": store, "source": STORE_LABELS.get(store, store.title()),
-            "title": clean_title, "price": price, "url": link,
-            "delivery": None, "thumbnail": res.get("thumbnail"), "token": None,
-        }
-        if pattern and pattern in urlparse(link).path:
-            return item
-        if fallback_item is None:
-            fallback_item = item
-    return fallback_item
-
-
-def _fetch_trusted_web_listings(query: str) -> list[dict]:
-    """Supplement with Google Web Search across trusted retailers + official brand site."""
-    body = _serp_get({
-        "engine": "google",
-        "q": f"{query} price nykaa OR tira OR amazon OR myntra OR purplle OR ajio",
-        "gl": "in", "hl": "en", "google_domain": "google.co.in",
-    })
-    listings = []
-    for res in body.get("organic_results", []):
-        link = res.get("link") or ""
-        netloc = urlparse(link).netloc.lower()
-        store = normalize_store(netloc, query)
-        if not store:
+        if not _matches_product(clean_title, query):
             continue
         price = _extract_web_price(res)
         if price:
-            clean_title = re.sub(
-                r"\s*[-|:]\s*(Buy Online.*|Nykaa|Tira|Amazon\.in|Myntra|Purplle|Ajio).*$",
-                "", res.get("title") or query.title(), flags=re.I,
-            ).strip()
             listings.append({
-                "store": store, "source": STORE_LABELS.get(store, store.title()),
-                "title": clean_title, "price": price, "url": link,
-                "delivery": None, "thumbnail": res.get("thumbnail"), "token": None,
+                "store": store,
+                "title": clean_title,
+                "price": price,
+                "url": link,
+                "delivery": None,
+                "thumbnail": res.get("thumbnail"),
             })
     return listings
 
@@ -336,7 +445,7 @@ def _fetch_demo(query: str) -> list[dict]:
             "store": store,
             "title": f"{query.title()} (demo listing)",
             "price": round(base * (0.9 + (int(hashlib.md5(f"{query}{store}".encode()).hexdigest(), 16) % 25) / 100), 0),
-            "url": f"https://www.google.com/search?q={query.replace(' ', '+')}+{store}",
+            "url": store_search_url(store, query),
             "delivery": None,
             "thumbnail": None,
         }
@@ -344,98 +453,26 @@ def _fetch_demo(query: str) -> list[dict]:
     ]
 
 
-# ---------------------------------------------------------------------------
-# Product matching (LLM Judge + simple keyword fallback)
-# ---------------------------------------------------------------------------
-JUDGE_PROMPT = """You match online shopping listings to a beauty / personal-care product search.
-
-SEARCH: "<<QUERY>>"
-<<TYPE>>The search may contain typos, abbreviations (e.g. 'vit c' = 'Vitamin C'), or omit the brand/full line name.
-
-LISTINGS (index: title):
-<<LINES>>
-
-Rules:
-1. BRAND: If the search names a brand, the listing must match that brand.
-2. PRODUCT & DESCRIPTORS: Match the product line and type. Descriptive formula words (like 'tubing', 'matte', 'hydrating', 'vitamin c') do not need to appear verbatim if the brand and product match (e.g. 'Staze 9to9 All Eyes On You Mascara' matches 'staze tubing mascara').
-3. LANGUAGE: Always pick an English listing as "best" whenever available, and include both English and Hindi listings of the exact same product in "same".
-4. FORM & BUNDLES: Do not match a shampoo to a serum, or a combo/kit to a single product unless requested.
-5. SHADE/SIZE: Prefer the requested shade/size; if only another shade/size is available, pick it and set "exact": false.
-6. "same" = all listing indexes that are the exact same product across stores/websites. If nothing fits, set "best": null.
-
-Return ONLY JSON: {"best": <index or null>, "same": [<indexes>], "exact": <true or false>}"""
-
-
-def _judge_listings(query: str, listings: list[dict], product_type: str = ""):
-    items = listings[:30]
-    if not items:
-        return None
-    lines = "\n".join(f"{i}: {(l.get('title') or '')[:110]}" for i, l in enumerate(items))
-    type_line = f'Product type: "{product_type}".\n' if product_type else ""
-    prompt = JUDGE_PROMPT.replace("<<QUERY>>", query).replace("<<TYPE>>", type_line).replace("<<LINES>>", lines)
-    try:
-        out = llm_client.chat(prompt)
-        data = json.loads(re.search(r"\{.*\}", out, flags=re.S).group())
-        best = data.get("best")
-        if best is None:
-            return None, [], True
-        best = int(best)
-        if not 0 <= best < len(items):
-            return None
-        same = {int(i) for i in (data.get("same") or []) if isinstance(i, (int, float)) and 0 <= int(i) < len(items)}
-        same.add(best)
-        return items[best], [items[i] for i in sorted(same)], bool(data.get("exact"))
-    except Exception:
-        return None
-
-
-def _simple_keyword_fallback(listings: list[dict], query: str):
-    words = [w for w in re.findall(r"[a-z0-9]+", query.lower()) if len(w) > 2]
-    if not listings or not words:
-        return (listings[0], listings[:1], True) if listings else (None, [], True)
-
-    scored = []
-    for item in listings:
-        title_low = (item.get("title") or "").lower()
-        hits = sum(1 for w in words if w in title_low)
-        ratio = hits / len(words)
-        if ratio >= 0.4 and not re.search(r"\b(combo|pack of \d|set of \d|kit)\b", title_low):
-            scored.append((not _is_hindi(item.get("title")), ratio, item))
-
-    if not scored:
-        return None, [], True
-    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    anchor = scored[0][2]
-    same = [x[2] for x in scored if x[1] >= 0.5]
-    return anchor, same, scored[0][1] >= 0.7
-
-
 def _best_per_store(listings: list[dict]) -> dict[str, dict]:
     best: dict[str, dict] = {}
     for item in listings:
-        if not item.get("store") or not item.get("price"):
+        st, price = item.get("store"), item.get("price")
+        if not st or not price:
             continue
-        cur = best.get(item["store"])
-        if cur is None or item["price"] < cur["price"]:
-            best[item["store"]] = item
-        elif item["price"] == cur["price"] and _is_hindi(cur.get("title")) and not _is_hindi(item.get("title")):
-            best[item["store"]] = item
+        cur = best.get(st)
+        if cur is None or price < cur["price"]:
+            best[st] = item
+        elif price == cur["price"] and is_google_url(cur.get("url")) and not is_google_url(item.get("url")):
+            best[st] = item
     return best
 
 
 # ---------------------------------------------------------------------------
-# Direct store URLs
+# Instant Store URLs (Zero Extra Latency)
 # ---------------------------------------------------------------------------
 def is_google_url(url: str | None) -> bool:
     netloc = urlparse(url).netloc if url else ""
     return not netloc or "google." in netloc
-
-
-def usable_url(store: str, title: str | None, url: str | None) -> str:
-    parsed = urlparse(url or "")
-    if parsed.scheme in ("http", "https") and parsed.netloc and not is_google_url(url):
-        return url
-    return store_search_url(store, title)
 
 
 def store_search_url(store: str, title: str | None) -> str:
@@ -449,73 +486,27 @@ def store_search_url(store: str, title: str | None) -> str:
     return f"https://www.google.com/search?q={quote_plus(f'{label} ' + ' '.join(words))}"
 
 
-def resolve_link(store: str, title: str | None) -> tuple[str | None, str]:
-    domain = STORE_DOMAINS.get(store)
-    pattern = PRODUCT_PATTERNS.get(store, "")
-    if not (domain and title):
-        return None, "no store domain or title"
-    if not os.environ.get("SERPAPI_KEY"):
-        return None, "no SERPAPI_KEY"
-
-    words = re.sub(r"[…]|\.\.\.|[()|,]", " ", title).split()
-    queries = [" ".join(words[:14])] + ([" ".join(words[:6])] if len(words) > 6 else [])
-    for q in queries:
-        try:
-            body = _serp_get({"engine": "google", "q": f"{q} site:{domain}", "gl": "in", "hl": "en"})
-        except Exception as e:
-            return None, _describe_error(e)
-        for res in body.get("organic_results", []):
-            link = res.get("link", "")
-            if domain in link and (not pattern or pattern in urlparse(link).path):
-                return link, "ok"
-    return None, f"no {domain} product page in search results"
-
-
-def direct_link(store: str, title: str | None, url: str | None) -> str | None:
-    global LAST_LINK_ERROR
-    if not is_google_url(url):
+def usable_url(store: str, title: str | None, url: str | None) -> str:
+    parsed = urlparse(url or "")
+    if parsed.scheme in ("http", "https") and parsed.netloc and not is_google_url(url):
         return url
-    if os.environ.get("RESOLVE_PRODUCT_PAGES", "1") == "0" or store not in STORE_DOMAINS:
-        return store_search_url(store, title)
-    found, reason = resolve_link(store, title)
-    if found:
-        return found
-    LAST_LINK_ERROR = f"{STORE_LABELS.get(store, store)}: {reason}"
     return store_search_url(store, title)
 
 
-def _fetch_exact_stores(token: str, query: str) -> tuple[list[dict], str]:
-    try:
-        body = _serp_get({
-            "engine": "google_immersive_product", "page_token": token,
-            "more_stores": "true", "hl": "en", "gl": "in",
-        }, timeout=45)
-    except Exception as e:
-        return [], _describe_error(e)
+def resolve_link(store: str, title: str | None) -> tuple[str | None, str]:
+    return store_search_url(store, title), "ok"
 
-    pr = body.get("product_results") or {}
-    thumbs = pr.get("thumbnails") or []
-    out = []
-    for st in pr.get("stores") or []:
-        store = normalize_store(st.get("name") or st.get("source"), query)
-        price = _num(st.get("extracted_price")) or _num(st.get("price"))
-        link = st.get("link")
-        if store and price and link:
-            out.append({
-                "store": store, "title": st.get("title") or pr.get("title"),
-                "price": price, "url": link, "delivery": None,
-                "thumbnail": thumbs[0] if thumbs else None,
-            })
-    return out, ("ok" if out else "no trusted stores in immersive response")
+
+def direct_link(store: str, title: str | None, url: str | None) -> str | None:
+    return usable_url(store, title, url)
 
 
 # ---------------------------------------------------------------------------
-# Main lookup + caching + targeted store search
+# Main Lookup + Cache + Target-Store Support
 # ---------------------------------------------------------------------------
 def get_offers(query: str, force_refresh: bool = False, product_type: str = "", target_store: str = "") -> dict:
-    """Fetch, match, cache, and return {product_id, name, match_title, exact, is_mock, offers}."""
-    global LAST_ERROR, LAST_LINK_ERROR
-    name = re.sub(r"\s+", " ", _expand_abbreviations(query).lower())
+    global LAST_ERROR
+    name = _clean_query(query)
     target = normalize_store(target_store, name) if target_store else None
 
     conn = get_conn()
@@ -527,18 +518,19 @@ def get_offers(query: str, force_refresh: bool = False, product_type: str = "", 
     ttl = ERROR_CACHE_SECONDS if rows and rows[0]["store"] in ("_error", "_none") else CACHE_SECONDS
     fresh = bool(rows) and not stale_demo and (time.time() - min(r["fetched_at"] for r in rows) < ttl)
 
-    # If the user asks for a specific store (e.g., Tira or Nykaa) that isn't cached yet, fetch it directly
+    # If user turns on 'One app only' for a store not in cache, fetch just that store in ~1s
     cached_stores = {r["store"] for r in rows}
     if fresh and target and target not in cached_stores and target in STORE_DOMAINS:
-        found_item = _fetch_store_specific(name, target)
-        if found_item:
-            _t(f"Targeted {STORE_LABELS.get(target, target)} search found ₹{found_item['price']:,.0f}")
+        extra = _fetch_google_search(name, target_store=target)
+        if extra:
+            top = sorted(extra, key=lambda x: x["price"])[0]
+            top["url"] = usable_url(target, top["title"], top.get("url"))
             conn.execute("DELETE FROM offers WHERE product_id = ? AND store IN ('_none', ?)", (product_id, target))
             conn.execute(
                 "INSERT INTO offers (product_id, store, title, price, url, delivery, thumbnail, is_mock, fetched_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
-                (product_id, target, found_item["title"], found_item["price"], found_item["url"],
-                 None, found_item.get("thumbnail"), int(time.time())),
+                (product_id, target, top["title"], top["price"], top["url"],
+                 None, top.get("thumbnail"), int(time.time())),
             )
             conn.commit()
             rows = conn.execute("SELECT * FROM offers WHERE product_id = ?", (product_id,)).fetchall()
@@ -546,16 +538,34 @@ def get_offers(query: str, force_refresh: bool = False, product_type: str = "", 
     if not fresh or force_refresh:
         is_mock, error, listings = 0, None, []
         if not os.environ.get("SERPAPI_KEY"):
-            LAST_ERROR = "SERPAPI_KEY was not found. Check your .env file and restart Streamlit."
+            LAST_ERROR = "SERPAPI_KEY was not found. Check your .env file."
             listings, is_mock = _fetch_demo(name), 1
         else:
-            try:
-                listings = _fetch_live(name)
-                LAST_ERROR = None
-            except Exception as e:
-                error = LAST_ERROR = _describe_error(e)
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                f_shop = pool.submit(_fetch_google_shopping, name)
+                f_web = pool.submit(_fetch_google_search, name, None)
+                shop_items, tokens, shop_err = f_shop.result()
+                web_items = f_web.result()
 
-        if error:
+            listings = shop_items + web_items
+            if tokens:
+                with ThreadPoolExecutor(max_workers=len(tokens)) as pool:
+                    for extra in pool.map(lambda tok: _fetch_immersive_stores(tok, name), tokens):
+                        listings.extend(extra)
+
+            # Quick fallback if target_store wasn't in the general results
+            if target and target in STORE_DOMAINS and not any(l.get("store") == target for l in listings):
+                listings.extend(_fetch_google_search(name, target_store=target))
+
+            if shop_err and not listings:
+                error = LAST_ERROR = shop_err
+            else:
+                LAST_ERROR = None
+
+            _t(f'Google search for "{name}": {len(listings)} matches across '
+               f'{len({l["store"] for l in listings})} stores')
+
+        if error and not listings:
             conn.execute("DELETE FROM offers WHERE product_id = ?", (product_id,))
             conn.execute(
                 "INSERT INTO offers (product_id, store, title, price, url, is_mock, fetched_at) "
@@ -566,80 +576,19 @@ def get_offers(query: str, force_refresh: bool = False, product_type: str = "", 
             conn.close()
             return _result(product_id, name, rows, None, True)
 
-        if not is_mock:
-            _t(f'Google Shopping for "{name}": {len(listings)} results across '
-               f'{len({l["store"] for l in listings if l["store"]})} trusted stores')
-
-        verdict = None if (is_mock or not listings) else _judge_listings(name, listings, product_type)
-        if verdict is not None:
-            anchor, same, exact_ok = verdict
-        else:
-            anchor, same, exact_ok = _simple_keyword_fallback(listings, name)
-
-        best = _best_per_store(same)
-        match_title = anchor["title"] if anchor else None
-        exact_flag = 1 if (anchor is None or exact_ok) else 0
-
-        if anchor is not None and not is_mock:
-            seed = anchor if anchor.get("token") else next((l for l in same if l.get("token")), None)
-            if seed:
-                exact, note = _fetch_exact_stores(seed["token"], name)
-                if exact:
-                    for it in exact:
-                        cur = best.get(it["store"])
-                        if cur is None or it["price"] <= cur["price"]:
-                            best[it["store"]] = {**it, "thumbnail": it.get("thumbnail") or seed.get("thumbnail")}
-                else:
-                    LAST_LINK_ERROR = f"exact-product lookup: {note}"
-
-        # Always check trusted retailers via Google Web Search if fewer than 3 trusted stores matched
-        if len(best) < TOP_N and not is_mock:
-            try:
-                web_listings = _fetch_trusted_web_listings(name)
-                if web_listings:
-                    _t(f"Trusted web search found {len(web_listings)} additional store listings")
-                    for item in web_listings:
-                        st = item["store"]
-                        if st not in best or item["price"] < best[st]["price"]:
-                            best[st] = item
-                    if not match_title:
-                        en_web = next((w["title"] for w in web_listings if not _is_hindi(w.get("title"))), None)
-                        match_title = en_web or web_listings[0]["title"]
-                        exact_flag = 1
-            except Exception as e:
-                _t(f"Trusted web search failed: {_describe_error(e)}")
-
-        # Only run a targeted site: search when a specific store was explicitly requested
-        if target and target not in best and target in STORE_DOMAINS and not is_mock:
-            found_item = _fetch_store_specific(name, target)
-            if found_item:
-                _t(f"Direct {STORE_LABELS.get(target, target)} lookup found ₹{found_item['price']:,.0f}")
-                best[target] = found_item
-                if not match_title:
-                    match_title = found_item["title"]
-                    exact_flag = 1
+        best = _best_per_store(listings)
+        en_titles = [v["title"] for v in best.values() if v.get("title") and not _is_hindi(v["title"])]
+        match_title = en_titles[0] if en_titles else (next(iter(best.values()))["title"] if best else None)
 
         if best and not is_mock:
-            en_titles = [v["title"] for v in best.values() if v.get("title") and not _is_hindi(v["title"])]
-            english_title = (
-                match_title if (match_title and not _is_hindi(match_title))
-                else (en_titles[0] if en_titles else name.title())
-            )
-            if _is_hindi(match_title):
-                match_title = english_title
-
-            default_thumb = (
-                (anchor.get("thumbnail") if anchor else None)
-                or next((v["thumbnail"] for v in best.values() if v.get("thumbnail")), None)
-            )
-            for item in best.values():
+            default_thumb = next((v["thumbnail"] for v in best.values() if v.get("thumbnail")), None)
+            for store, item in best.items():
                 if _is_hindi(item.get("title")):
-                    item["title"] = english_title
+                    item["title"] = match_title or name.title()
                 if not item.get("thumbnail") and default_thumb:
                     item["thumbnail"] = default_thumb
+                item["url"] = usable_url(store, item["title"], item.get("url"))
 
-            for store, item in best.items():
-                item["url"] = direct_link(store, item["title"], item["url"])
             _t("Trusted offers: " + ", ".join(
                 f"{STORE_LABELS.get(k, k)} ₹{v['price']:,.0f}"
                 for k, v in sorted(best.items(), key=lambda kv: kv[1]["price"])
@@ -657,9 +606,9 @@ def get_offers(query: str, force_refresh: bool = False, product_type: str = "", 
                 "INSERT INTO offers (product_id, store, title, price, url, delivery, thumbnail, is_mock, fetched_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (product_id, store, item["title"], item["price"], item["url"],
-                 item["delivery"], item.get("thumbnail"), is_mock, now),
+                 item.get("delivery"), item.get("thumbnail"), is_mock, now),
             )
-        conn.execute("UPDATE products SET match_title = ?, exact = ? WHERE id = ?", (match_title, exact_flag, product_id))
+        conn.execute("UPDATE products SET match_title = ?, exact = 1 WHERE id = ?", (match_title, product_id))
         conn.commit()
         rows = conn.execute("SELECT * FROM offers WHERE product_id = ?", (product_id,)).fetchall()
 
@@ -686,47 +635,15 @@ def _result(product_id: int, name: str, rows, match_title: str | None, exact: bo
     }
 
 
-ALT_PROMPT = (
-    "A shopper searched Google India for a beauty product. Expand abbreviations or colloquial names "
-    "to the official product name (e.g. 'staze tubing mascara' -> 'Staze 9to9 All Eyes On You Mascara').\n"
-    "SEARCH: \"<<Q>>\"\n<<HINT>>"
-    "Return ONLY a JSON array of up to 2 better English Google search queries."
-)
-
-
-def _alternatives(query: str, closest: str | None = None) -> list[str]:
-    hint = f'Closest listing so far: "{closest}".\n' if closest else ""
-    try:
-        out = llm_client.chat(ALT_PROMPT.replace("<<Q>>", query).replace("<<HINT>>", hint))
-        alts = [re.sub(r"\s+", " ", str(q)).strip() for q in json.loads(re.search(r"\[.*\]", out, flags=re.S).group())]
-    except Exception:
-        expanded = _expand_abbreviations(query)
-        no_pct = re.sub(r"\s+", " ", re.sub(r"\b\d+\s*%\s*", "", expanded)).strip()
-        alts = [q for q in (expanded, no_pct) if q.lower() != query.strip().lower()]
-
-    seen, result = {query.strip().lower()}, []
-    for q in alts:
-        if q and q.lower() not in seen:
-            seen.add(q.lower())
-            result.append(q)
-    return result[:2]
-
-
 def get_offers_with_fallback(query: str, product_type: str = "", target_store: str = "") -> dict:
-    """Look up prices across trusted stores, retrying with expanded names if needed."""
     _CURRENT.clear()
     data = get_offers(query, product_type=product_type, target_store=target_store)
-    best = data
-    if not (data.get("error") or data["is_mock"] or (data["offers"] and data["exact"])):
-        for alt in _alternatives(query, data.get("match_title")):
-            _t(f'Retrying with: "{alt}"')
-            retry = get_offers(alt, product_type=product_type, target_store=target_store)
-            if retry.get("error"):
-                break
-            if retry["offers"] and (retry["exact"] or not best["offers"]):
-                best = retry
-                if retry["exact"]:
-                    break
+    if not data["offers"] and not data.get("error"):
+        words = data["name"].split()
+        if len(words) > 3:
+            shorter = " ".join(words[:3])
+            _t(f'Retrying shorter query: "{shorter}"')
+            data = get_offers(shorter, product_type=product_type, target_store=target_store)
     if _CURRENT:
-        TRACE[best["name"]] = list(_CURRENT)
-    return best
+        TRACE[data["name"]] = list(_CURRENT)
+    return data

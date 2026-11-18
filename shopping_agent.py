@@ -136,9 +136,11 @@ def get_youtube_reviews(product: str) -> str:
 
 
 VISION_PROMPT = (
-    "Read all text on this beauty product packaging and return ONLY JSON: "
+    "You are a beauty product packaging & visual recognition expert. "
+    "Examine the bottle/tube shape, cap design, logo, and all visible text carefully (e.g., silver metallic cap with '3D HYDRA' is KIKO Milano 3D Hydra Lipgloss). "
+    "Return ONLY JSON: "
     '{"brand": str|null, "brand_readable": bool, "product_name": str|null, '
-    '"product_type": str, "variant": str|null, "search_query": str}. '
+    '"product_type": str, "variant": str|null, "search_query": "<clean brand + product name WITHOUT shade numbers or ml size>"}. '
     'If not a beauty/personal-care product, return {"product_type": "unsupported"}.'
 )
 
@@ -212,10 +214,10 @@ agent = create_agent(
         "  4. Show the updated routine list, the new product's price, and the recalculated total vs. their budget (and offer to add it to cart).\n\n"
         "PRICES: Call compare_prices. If the user asks about a specific app/store (like Nykaa or Tira), pass that store name. "
         "Product cards appear under your reply, so for single-product lookups write 1–2 friendly sentences highlighting the best deal and savings. "
-        "If exact_match is false, mention closest_match.\n\n"
-        "REVIEWS: Call get_reddit_reviews and/or get_youtube_reviews. Summarize pros, cons, and the real user consensus in a friendly, honest tone "
+        "If exact_match is false, mention closest_match. NEVER invent or guess approximate prices or Markdown tables if offers is empty.\n\n"
+        "REVIEWS: ONLY call get_reddit_reviews or get_youtube_reviews when the user explicitly asks for reviews, feedback, pros/cons, or whether a product is good. NEVER call review tools during price checks or image lookups. When asked, summarize pros, cons, and consensus with clickable Markdown links like [Title](https://...). Mention skipped sponsored videos.\n\n"
         "with clickable Markdown links like [Title](https://...). Mention skipped sponsored videos.\n\n"
-        "IMAGES: Call describe_product_image, then compare_prices using its search_query.\n\n"
+        "IMAGES: Call describe_product_image first, then IMMEDIATELY call compare_prices with its search_query (brand + product name only, no shade code).\n\n"
         "CART: Call add_to_cart when requested. If the user specifies an app, pass store='nykaa'/'tira'/'amazon'; otherwise leave "
         "store empty so it defaults to Amazon. Confirm warmly which store it went to and the price. You can NEVER place an order or pay.\n\n"
         "Use plain text and Markdown links only: no tables, HTML tags, or code blocks."
