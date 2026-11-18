@@ -26,7 +26,6 @@ TRUSTED_ALIASES = {
     "ajio": "ajio",
     "big basket": "bigbasket",
     "bigbasket": "bigbasket",
-    "instagram": "instagram",
 }
 
 STORE_LABELS = {
@@ -38,7 +37,6 @@ STORE_LABELS = {
     "myntra": "Myntra",
     "ajio": "Ajio",
     "bigbasket": "BigBasket",
-    "instagram": "Instagram",
 }
 
 STORE_DOMAINS = {
@@ -50,7 +48,6 @@ STORE_DOMAINS = {
     "myntra": "myntra.com",
     "ajio": "ajio.com",
     "bigbasket": "bigbasket.com",
-    "instagram": "instagram.com",
 }
 
 STORE_SEARCH = {
@@ -62,7 +59,6 @@ STORE_SEARCH = {
     "myntra": "https://www.myntra.com/{q}",
     "ajio": "https://www.ajio.com/search/?text={q}",
     "bigbasket": "https://www.bigbasket.com/ps/?q={q}",
-    "instagram": "https://www.instagram.com/explore/tags/{q}/",
 }
 
 PRODUCT_PATTERNS = {
@@ -340,7 +336,7 @@ def _matches_product(title: str, query: str) -> bool:
     t_norm = _norm(title)
     if not t_norm or any(bad in t_norm for bad in BAD_PAGE_TITLES):
         return False
-    if re.search(r"\b(combo|pack\s*of\s*\d|set\s*of\b|kit|duo|trio)\b", t_norm):
+    if re.search(r"\b(combo|pack\s*of\s*\d|set\s*of\b|kit|duo|trio|shades|collection|range|swatches|variants)\b", t_norm):
         return False
 
     q_words = [w for w in re.findall(r"[a-z0-9]+", _clean_query(query)) if len(w) >= 2 and w not in STOP_WORDS]
@@ -393,10 +389,7 @@ def _extract_web_price(res: dict) -> float | None:
         or _num(bot_ext.get("price_from"))
         or _num(res.get("price"))
     )
-    if not price:
-        text = f"{res.get('title', '')} {res.get('snippet', '')}"
-        m = re.search(r"(?:₹|Rs\.?|INR)\s*([\d,]+(?:\.\d+)?)", text, re.I)
-        price = _num(m.group(1)) if m else None
+    # Removed the regex fallback that grabbed random numbers from text snippets
     return price if (price and 25 <= price <= 50000) else None
 
 

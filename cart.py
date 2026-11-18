@@ -52,8 +52,7 @@ def _upsert_cart_item(product_id: int, store: str, title: str, price: float, url
         """
         INSERT INTO cart_items (product_id, store, title, price, url, qty)
         VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(product_id) DO UPDATE SET
-            store = excluded.store,
+        ON CONFLICT(product_id, store) DO UPDATE SET
             title = excluded.title,
             price = excluded.price,
             url   = excluded.url,
@@ -116,13 +115,23 @@ def add_offer(product_id: int, store: str, qty: int = 1) -> bool:
     return True
 
 
-def remove_item(query: str) -> bool:
+def remove_item(query: str, store: str = "") -> bool:
     name = re.sub(r"\s+", " ", query.strip().lower())
     conn = get_conn()
-    cur = conn.execute(
-        "DELETE FROM cart_items WHERE product_id IN (SELECT id FROM products WHERE name LIKE ?)",
-        (f"%{name}%",),
-    )
+    
+    if store:
+        # Delete only from the specific store
+        cur = conn.execute(
+            "DELETE FROM cart_items WHERE store = ? AND product_id IN (SELECT id FROM products WHERE name LIKE ?)",
+            (store, f"%{name}%"),
+        )
+    else:
+        # Fallback: delete across all stores (keeps the AI agent working as before)
+        cur = conn.execute(
+            "DELETE FROM cart_items WHERE product_id IN (SELECT id FROM products WHERE name LIKE ?)",
+            (f"%{name}%",),
+        )
+        
     conn.commit()
     conn.close()
     return cur.rowcount > 0

@@ -186,7 +186,7 @@ with st.sidebar:
     cart.set_setting("cart_mode", "multi" if mode_label == "Cheapest across apps" else "single")
 
     if mode_label == "One app only":
-        trusted_keys = ["amazon", "tira", "nykaa", "ajio", "purplle", "instagram", "blinkit", "myntra", "bigbasket"]
+        trusted_keys = ["amazon", "tira", "nykaa", "ajio", "purplle", "blinkit", "myntra", "bigbasket"]
         current = cart.get_setting("single_store")
         chosen = st.selectbox(
             "Which app?", trusted_keys,
@@ -330,10 +330,14 @@ def show_cart() -> None:
         with st.container(border=True):
             st.subheader(f"{group['label']}  ·  ₹{group['total']:,.0f}")
             for item in group["items"]:
+                col1, col2 = st.columns([10, 1])
                 line = f"{item['qty']} × {item['name'].title()} — ₹{item['price']:,.0f}"
                 if item["url"]:
                     line += f"  ([view product]({item['url']}))"
-                st.markdown(line)
+                col1.markdown(line)
+                if col2.button("🗑️", key=f"del_{store}_{item['name']}", help="Remove from cart"):
+                    cart.remove_item(item["name"], store)
+                    st.rerun()
             if group.get("bulk_link"):
                 st.link_button(f"Open {group['label']} cart with all items", group["bulk_link"])
             else:

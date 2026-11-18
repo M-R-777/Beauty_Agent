@@ -50,12 +50,13 @@ def create_database() -> None:
         );
 
         CREATE TABLE IF NOT EXISTS cart_items (
-            product_id INTEGER PRIMARY KEY,
+            product_id INTEGER NOT NULL,
             store      TEXT NOT NULL,
             title      TEXT,
             price      REAL NOT NULL,
             url        TEXT,
             qty        INTEGER DEFAULT 1,
+            PRIMARY KEY (product_id, store),
             FOREIGN KEY (product_id) REFERENCES products(id)
         );
 
@@ -83,5 +84,28 @@ def create_database() -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(looks)").fetchall()}
     if "creator" not in cols:
         conn.execute("ALTER TABLE looks ADD COLUMN creator TEXT")
+
+    # Migrate legacy cart_items (PK only on product_id) to composite PK (product_id, store)
+    cart_pk = {r["name"]: r["pk"] for r in conn.execute("PRAGMA table_info(cart_items)").fetchall()}
+    if cart_pk.get("product_id") == 1 and cart_pk.get("store", 0) == 0:
+        conn.executescript(
+            """
+            ALTER TABLE cart_items RENAME TO cart_items_old;
+            CREATE TABLE cart_items (
+                product_id INTEGER NOT NULL,
+                store      TEXT NOT NULL,
+                title      TEXT,
+                price      REAL NOT NULL,
+                url        TEXT,
+                qty        INTEGER DEFAULT 1,
+                PRIMARY KEY (product_id, store),
+                FOREIGN KEY (product_id) REFERENCES products(id)
+            );
+            INSERT OR IGNORE INTO cart_items (product_id, store, title, price, url, qty)
+            SELECT product_id, store, title, price, url, qty FROM cart_items_old;
+            DROP TABLE cart_items_old;
+            """
+        )
+
     conn.commit()
     conn.close()
