@@ -128,13 +128,26 @@ EXCLUSIVE_ACTIVES = {
     "glycolic", "kojic", "alpha", "azelaic", "peptide", "ceramide", "squalane",
 }
 
-STOP_WORDS = {"the", "for", "and", "with", "paris", "india", "skin", "face", "hair", "body", "buy", "online", "milano"}
+STOP_WORDS = {"the", "a", "an", "for", "and", "with", "from", "of", "in", "by", "buy", "online", "india", "hair", "skin"}
 BAD_PAGE_TITLES = ("please enable javascript", "access denied", "just a moment", "robot check", "captcha")
 
 TRACE: dict[str, list[str]] = {}
 _CURRENT: list[str] = []
 LAST_ERROR: str | None = None
 LAST_LINK_ERROR: str | None = None
+LENS_HINTS: list[dict] = []
+
+
+def seed_lens_hints(links: list[dict]) -> None:
+    """Keep Google Lens retailer matches so the next price lookup can merge them in."""
+    LENS_HINTS.clear()
+    for m in links:
+        store = normalize_store(m.get("source") or m.get("link"))
+        price = _num(m.get("price"))
+        title = re.split(r"\s+\|\s+", re.sub(r"^Buy\s+", "", m.get("title") or "", flags=re.I))[0].strip()
+        if store and price and m.get("link") and title:
+            LENS_HINTS.append({"store": store, "title": title, "price": price, "url": m["link"],
+                               "delivery": None, "thumbnail": _extract_thumbnail(m)})
 
 
 def _t(msg: str) -> None:
@@ -173,7 +186,9 @@ def _clean_query(query: str) -> str:
 
 
 def _is_official_brand_source(source: str, query: str) -> bool:
-    s_clean = re.sub(r"[^a-z0-9]", "", _norm(source))
+    raw = source.strip()
+    host = urlparse(raw if "://" in raw else f"https://{raw}").netloc if ("." in raw or "/" in raw) else raw
+    s_clean = re.sub(r"[^a-z0-9]", "", _norm(host))
     q_low = _norm(query)
     if any(bad.rstrip(".") in s_clean for bad in BLOCKED_DOMAINS):
         return False
@@ -209,6 +224,83 @@ def _num(value) -> float | None:
         return float(value)
     m = re.search(r"[\d,]+(?:\.\d+)?", str(value))
     return float(m.group().replace(",", "")) if m else None
+
+
+def _image_url(value) -> str | None:
+    """Return the first usable image URL from SerpApi's image field formats."""
+    if isinstance(value, str):
+        url = value.strip()
+        return url if url.startswith(("https://", "http://")) else None
+    if isinstance(value, dict):
+        for key in ("url", "link", "thumbnail"):
+            url = _image_url(value.get(key))
+            if url:
+                return url
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            url = _image_url(item)
+            if url:
+                return url
+    return None
+
+
+def _extract_thumbnail(item: dict) -> str | None:
+    """Read all documented SerpApi thumbnail fields, preferring its hosted image."""
+    for key in ("serpapi_thumbnail", "thumbnail", "serpapi_thumbnails", "thumbnails"):
+        url = _image_url(item.get(key))
+        if url:
+            return url
+    return None
+
+
+def _image_title_matches_product(title: str, query: str) -> bool:
+    """Reject image-search results whose title does not describe this product."""
+    title_words = set(re.findall(r"[a-z0-9]+", _norm(title or "")))
+    query_words = [
+        w for w in re.findall(r"[a-z0-9]+", _clean_query(query))
+        if len(w) >= 2 and w not in STOP_WORDS
+    ]
+    if not query_words:
+        return False
+    # Keep the brand/product identity check, but allow the brand anywhere in
+    # image titles (Google Images often places it after the product name).
+    if query_words[0] not in title_words:
+        return False
+    descriptors = query_words[1:]
+    if not descriptors:
+        return True
+    hits = sum(1 for word in descriptors if word in title_words)
+    return hits / len(descriptors) >= 0.6
+
+
+def _fetch_product_image(query: str) -> str | None:
+    """Fallback to a title-matched Google Images product photo when Shopping has none."""
+    try:
+        body = _serp_get({
+            "engine": "google_images",
+            "q": f'"{query}" product packaging',
+            "location": "India",
+            "gl": "in",
+            "hl": "en",
+            "google_domain": "google.co.in",
+            "num": 20,
+        })
+    except Exception:
+        return None
+
+    candidates = []
+    for result in body.get("images_results", []):
+        title = result.get("title") or ""
+        if not _image_title_matches_product(title, query):
+            continue
+        # Prefer results Google explicitly identifies as products, then use
+        # SerpApi's proxied thumbnail (more reliable in browser cards).
+        is_product = bool(result.get("is_product"))
+        image_url = _image_url(result.get("thumbnail")) or _image_url(result.get("original"))
+        if image_url:
+            candidates.append((not is_product, image_url))
+
+    return min(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
 def _serp_get(params: dict, timeout: int = 12) -> dict:
@@ -248,17 +340,18 @@ def _matches_product(title: str, query: str) -> bool:
     t_norm = _norm(title)
     if not t_norm or any(bad in t_norm for bad in BAD_PAGE_TITLES):
         return False
-    if re.search(r"\b(combo|pack\s*of\s*\d|set\s*of\s*\d|kit|duo|trio)\b", t_norm):
+    if re.search(r"\b(combo|pack\s*of\s*\d|set\s*of\b|kit|duo|trio)\b", t_norm):
         return False
 
     q_words = [w for w in re.findall(r"[a-z0-9]+", _clean_query(query)) if len(w) >= 2 and w not in STOP_WORDS]
     if not q_words:
         return True
 
-    t_words = set(re.findall(r"[a-z0-9]+", t_norm))
+    t_list = re.findall(r"[a-z0-9]+", t_norm)
+    t_words = set(t_list)
     q_set = set(q_words)
 
-    # 1. Never mix product forms (e.g., shampoo vs serum)
+    # 1. Never mix incompatible product forms (e.g., shampoo vs serum)
     banned = set()
     for form, others in EXCLUSIVE_FORMS.items():
         if form in q_set:
@@ -267,28 +360,37 @@ def _matches_product(title: str, query: str) -> bool:
     if banned and (t_words & banned) and not (t_words & (q_set & set(EXCLUSIVE_FORMS.keys()))):
         return False
 
-    # 2. Never mix key active ingredients (e.g., Niacinamide vs Vitamin C)
+    # 2. Never mix distinct active ingredients (e.g., Niacinamide vs Vitamin C)
     q_actives = q_set & EXCLUSIVE_ACTIVES
     if q_actives and not (q_actives <= t_words):
         return False
 
-    # 3. Brand (first word) must match
-    if q_words[0] not in t_words and q_words[0] not in t_norm:
+    # 3. Brand position rule: first meaningful word of query must appear in the first 4 words of the title
+    if q_words[0] not in t_list[:4]:
         return False
 
-    # 4. Require all non-numeric descriptor words (ignore percentages like "10%" when counting)
+    # 4. General descriptor overlap (at least 60% of remaining non-numeric query words)
     descriptors = [w for w in q_words[1:] if not w.isdigit()]
     if not descriptors:
         return True
     hits = sum(1 for w in descriptors if w in t_words or w in t_norm)
-    needed = len(descriptors) if len(descriptors) <= 2 else len(descriptors) - 1
-    return hits >= needed
+    return (hits / len(descriptors)) >= 0.6
+
+def _strict_match(title: str, query: str) -> bool:
+    """True only if every meaningful query word is in the title (used to vet thumbnails)."""
+    t = _norm(title or "")
+    return all(w in t for w in re.findall(r"[a-z0-9]+", _clean_query(query)) if len(w) >= 2 and w not in STOP_WORDS)
+
 
 def _extract_web_price(res: dict) -> float | None:
     rich = res.get("rich_snippet") or {}
+    top_ext = (rich.get("top") or {}).get("detected_extensions") or {}
+    bot_ext = (rich.get("bottom") or {}).get("detected_extensions") or {}
     price = (
-        _num(((rich.get("top") or {}).get("detected_extensions") or {}).get("price"))
-        or _num(((rich.get("bottom") or {}).get("detected_extensions") or {}).get("price"))
+        _num(top_ext.get("price"))
+        or _num(top_ext.get("price_from"))
+        or _num(bot_ext.get("price"))
+        or _num(bot_ext.get("price_from"))
         or _num(res.get("price"))
     )
     if not price:
@@ -301,7 +403,7 @@ def _extract_web_price(res: dict) -> float | None:
 # ---------------------------------------------------------------------------
 # Fast Parallel Google Shopping + Google Search + Immersive Store Expansion
 # ---------------------------------------------------------------------------
-def _fetch_google_shopping(query: str) -> tuple[list[dict], list[str], str | None]:
+def _fetch_google_shopping(query: str) -> tuple[list[dict], list[str], str | None, str | None]:
     try:
         body = _serp_get({
             "engine": "google_shopping",
@@ -313,22 +415,26 @@ def _fetch_google_shopping(query: str) -> tuple[list[dict], list[str], str | Non
             "num": 40,
         })
     except Exception as e:
-        return [], [], _describe_error(e)
+        return [], [], None, _describe_error(e)
 
     err = body.get("error") or ""
     raw = body.get("shopping_results", []) + body.get("inline_shopping_results", [])
     if err and not raw:
         if "hasn't returned any results" in err.lower() or "no results" in err.lower():
-            return [], [], None
-        return [], [], err
+            return [], [], None, None
+        return [], [], None, err
 
     listings, tokens, fallback_thumb = [], [], None
     for item in raw:
         title = item.get("title") or ""
         if not _matches_product(title, query):
             continue
-        if not fallback_thumb and item.get("thumbnail"):
-            fallback_thumb = item.get("thumbnail")
+        item_thumb = _extract_thumbnail(item)
+        if not fallback_thumb and item_thumb:
+            fallback_thumb = item_thumb
+        tok = item.get("immersive_product_page_token")
+        if tok and tok not in tokens:
+            tokens.append(tok)
 
         store = normalize_store(item.get("source"), query)
         price = _num(item.get("extracted_price")) or _num(item.get("price"))
@@ -339,10 +445,9 @@ def _fetch_google_shopping(query: str) -> tuple[list[dict], list[str], str | Non
                 "price": price,
                 "url": item.get("product_link") or item.get("link"),
                 "delivery": item.get("delivery"),
-                "thumbnail": item.get("thumbnail"),
+                "thumbnail": item_thumb,
             })
-    return listings, tokens[:2], None
-
+    return listings, tokens[:3], fallback_thumb, None
 
 def _fetch_immersive_stores(token: str, query: str) -> list[dict]:
     try:
@@ -361,8 +466,7 @@ def _fetch_immersive_stores(token: str, query: str) -> list[dict]:
     if canonical and not _matches_product(canonical, query):
         return []
 
-    thumbs = pr.get("thumbnails") or []
-    thumb = thumbs[0] if thumbs else None
+    thumb = _extract_thumbnail(pr)
     out = []
     for st in (pr.get("stores") or []) + (pr.get("online_sellers") or []):
         store = normalize_store(st.get("name") or st.get("source"), query)
@@ -374,7 +478,7 @@ def _fetch_immersive_stores(token: str, query: str) -> list[dict]:
                 "price": price,
                 "url": st.get("link"),
                 "delivery": st.get("shipping"),
-                "thumbnail": thumb,
+                "thumbnail": _extract_thumbnail(st) or thumb,
             })
     return out
 
@@ -388,7 +492,7 @@ def _fetch_google_search(query: str, target_store: str | None = None) -> list[di
     try:
         body = _serp_get({
             "engine": "google",
-            "q": f"{query} price {site_filter}",
+            "q": f"{query} {site_filter}",
             "location": "India",
             "gl": "in",
             "hl": "en",
@@ -410,11 +514,13 @@ def _fetch_google_search(query: str, target_store: str | None = None) -> list[di
                 "price": price,
                 "url": item.get("link") or item.get("product_link"),
                 "delivery": item.get("delivery"),
-                "thumbnail": item.get("thumbnail"),
+                "thumbnail": _extract_thumbnail(item),
             })
 
     for res in body.get("organic_results", []):
         link = _real_url(res)
+        if "/reviews/" in link:
+            continue
         hint = f"{urlparse(link).netloc} {res.get('displayed_link', '')} {res.get('source', '')}"
         store = normalize_store(hint, query)
         if not store:
@@ -433,7 +539,7 @@ def _fetch_google_search(query: str, target_store: str | None = None) -> list[di
                 "price": price,
                 "url": link,
                 "delivery": None,
-                "thumbnail": res.get("thumbnail"),
+                "thumbnail": _extract_thumbnail(res),
             })
     return listings
 
@@ -515,8 +621,25 @@ def get_offers(query: str, force_refresh: bool = False, product_type: str = "", 
 
     rows = conn.execute("SELECT * FROM offers WHERE product_id = ?", (product_id,)).fetchall()
     stale_demo = bool(rows) and rows[0]["is_mock"] and bool(os.environ.get("SERPAPI_KEY"))
-    ttl = ERROR_CACHE_SECONDS if rows and rows[0]["store"] in ("_error", "_none") else CACHE_SECONDS
-    fresh = bool(rows) and not stale_demo and (time.time() - min(r["fetched_at"] for r in rows) < ttl)
+    ttl = ERROR_CACHE_SECONDS if rows and rows[0]["store"] in ("_error", "_none") else (600 if len(rows) < 2 else CACHE_SECONDS)
+    # Retry image-less cached offers sooner so old placeholder-only cards can acquire real images.
+    offer_rows = [r for r in rows if r["store"] not in ("_none", "_error")]
+    missing_thumbnails = any(not r["thumbnail"] for r in offer_rows)
+    cache_ttl = min(ttl, 600) if missing_thumbnails else ttl
+    fresh = bool(rows) and not stale_demo and not LENS_HINTS and (time.time() - min(r["fetched_at"] for r in rows) < cache_ttl)
+
+    # Existing price records may predate image extraction. Backfill only their
+    # missing thumbnails without re-running the price search or changing prices.
+    if fresh and missing_thumbnails and os.environ.get("SERPAPI_KEY"):
+        cached_image = _fetch_product_image(name)
+        if cached_image:
+            conn.execute(
+                "UPDATE offers SET thumbnail = ? WHERE product_id = ? "
+                "AND store NOT IN ('_none', '_error') AND (thumbnail IS NULL OR thumbnail = '')",
+                (cached_image, product_id),
+            )
+            conn.commit()
+            rows = conn.execute("SELECT * FROM offers WHERE product_id = ?", (product_id,)).fetchall()
 
     # If user turns on 'One app only' for a store not in cache, fetch just that store in ~1s
     cached_stores = {r["store"] for r in rows}
@@ -536,18 +659,20 @@ def get_offers(query: str, force_refresh: bool = False, product_type: str = "", 
             rows = conn.execute("SELECT * FROM offers WHERE product_id = ?", (product_id,)).fetchall()
 
     if not fresh or force_refresh:
-        is_mock, error, listings = 0, None, []
+        is_mock, error, listings, shop_thumb = 0, None, [], None
         if not os.environ.get("SERPAPI_KEY"):
             LAST_ERROR = "SERPAPI_KEY was not found. Check your .env file."
             listings, is_mock = _fetch_demo(name), 1
         else:
             with ThreadPoolExecutor(max_workers=2) as pool:
                 f_shop = pool.submit(_fetch_google_shopping, name)
-                f_web = pool.submit(_fetch_google_search, name, None)
-                shop_items, tokens, shop_err = f_shop.result()
+                f_web = pool.submit(_fetch_google_search, name, target)
+                shop_items, tokens, shop_thumb, shop_err = f_shop.result()
                 web_items = f_web.result()
 
             listings = shop_items + web_items
+            listings += [h for h in LENS_HINTS if _matches_product(h["title"], name)]
+            LENS_HINTS.clear()
             if tokens:
                 with ThreadPoolExecutor(max_workers=len(tokens)) as pool:
                     for extra in pool.map(lambda tok: _fetch_immersive_stores(tok, name), tokens):
@@ -581,12 +706,20 @@ def get_offers(query: str, force_refresh: bool = False, product_type: str = "", 
         match_title = en_titles[0] if en_titles else (next(iter(best.values()))["title"] if best else None)
 
         if best and not is_mock:
-            default_thumb = next((v["thumbnail"] for v in best.values() if v.get("thumbnail")), None)
+            any_thumb = next((l["thumbnail"] for l in listings if l.get("thumbnail")), None) or shop_thumb
+            # Shopping results sometimes contain prices but omit all image URLs.
+            # In that case, fetch one exact-product image and reuse it for the
+            # same product across the retailer cards.
+            if not any_thumb and os.environ.get("SERPAPI_KEY"):
+                any_thumb = _fetch_product_image(name)
+            store_thumbs = {}
+            for l in listings:
+                if l.get("thumbnail"):
+                    store_thumbs.setdefault(l["store"], l["thumbnail"])
             for store, item in best.items():
                 if _is_hindi(item.get("title")):
                     item["title"] = match_title or name.title()
-                if not item.get("thumbnail") and default_thumb:
-                    item["thumbnail"] = default_thumb
+                item["thumbnail"] = item.get("thumbnail") or store_thumbs.get(store) or any_thumb
                 item["url"] = usable_url(store, item["title"], item.get("url"))
 
             _t("Trusted offers: " + ", ".join(
@@ -623,7 +756,14 @@ def _result(product_id: int, name: str, rows, match_title: str | None, exact: bo
     for r in rows:
         if r["store"] not in ("_none", "_error"):
             STORE_LABELS.setdefault(r["store"], f"{r['store'].title()} (Official)")
-            offers[r["store"]] = dict(r)
+            offer = dict(r)
+            image_url = _image_url(offer.get("thumbnail"))
+            # Keep the DB field unchanged and expose aliases for UI consumers
+            # that use image_url/image rather than thumbnail.
+            offer["thumbnail"] = image_url
+            offer["image_url"] = image_url
+            offer["image"] = image_url
+            offers[r["store"]] = offer
     return {
         "product_id": product_id,
         "name": name,

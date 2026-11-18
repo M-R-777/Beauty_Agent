@@ -15,7 +15,7 @@ from langchain_groq import ChatGroq
 import cart
 import reviews
 import skin_quiz
-from price_sources import STORE_LABELS, get_offers_with_fallback
+from price_sources import STORE_LABELS, get_offers_with_fallback, seed_lens_hints
 
 load_dotenv()
 
@@ -70,11 +70,11 @@ def get_skin_profile() -> str:
 
 @tool
 def compare_prices(product: str, product_type: str = "", store: str = "") -> str:
-    """Compare prices of a beauty product across trusted Indian stores (or check one specific store if named)."""
+    """Compare prices of a beauty product across trusted Indian stores (or check one specific store if named).
+    ALWAYS normalize `product` to `<Brand> <Canonical Product Name>` before calling
+    (e.g., 'glycolic toner from the ordinary' -> 'The Ordinary Glycolic Acid 7% Toning Solution').
+    """
     query = product.strip()
-    if product_type and product_type.lower() not in ("skincare", "makeup", "haircare", "beauty", "cosmetics"):
-        if product_type.lower() not in query.lower():
-            query = f"{query} {product_type.strip()}"
 
     single = cart.get_setting("cart_mode") == "single"
     selected_store = store.strip() or (cart.get_setting("single_store") if single else "")
@@ -145,15 +145,99 @@ VISION_PROMPT = (
 )
 
 
+def _upload_temp_image(real_path: str) -> str | None:
+    """Upload temp image to a fast ephemeral host so SerpApi Google Lens can fetch it."""
+    for url, field, extra in (
+        ("https://uguu.se/upload", "files[]", {}),
+        ("https://catbox.moe/user/api.php", "fileToUpload", {"reqtype": "fileupload"}),
+    ):
+        try:
+            with open(real_path, "rb") as f:
+                r = requests.post(url, data=extra, files={field: (os.path.basename(real_path), f)}, timeout=8)
+            txt = r.text.strip()
+            if txt.startswith("{"):
+                txt = (r.json().get("files") or [{}])[0].get("url", "")
+            if txt.startswith("http"):
+                return txt
+        except Exception:
+            continue
+    return None
+
+
+def _consensus_title(titles: list[str]) -> str:
+    """Pick the title sharing the most words with the other candidates."""
+    sets = [set(re.findall(r"[a-z0-9]+", t.lower())) for t in titles]
+    scores = [sum(len(s & o) for o in sets if o is not s) for s in sets]
+    return titles[scores.index(max(scores))]
+
+
+def _google_lens_lookup(real_path: str) -> dict | None:
+    """Visual reverse-image search via SerpApi Google Lens — extracts direct store matches + best title."""
+    serp_key = os.environ.get("SERPAPI_KEY")
+    if not serp_key:
+        return None
+    img_url = _upload_temp_image(real_path)
+    if not img_url:
+        return None
+    try:
+        resp = requests.get(
+            "https://serpapi.com/search.json",
+            params={"engine": "google_lens", "url": img_url, "hl": "en", "gl": "in", "api_key": serp_key},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        matches = resp.json().get("visual_matches") or []
+        if not matches:
+            return None
+
+        # Prefer titles from actual Indian beauty retailers (Nykaa, Tira, Amazon, Purplle, Myntra) over Pinterest/social noise
+        retailer_domains = ("nykaa.com", "tirabeauty.com", "amazon.in", "purplle.com", "myntra.com", "ajio.com")
+        retailer_hits = [m for m in matches if any(d in (m.get("link") or "").lower() for d in retailer_domains)]
+        ordered = retailer_hits + [m for m in matches if m not in retailer_hits]
+
+        top_titles = [m.get("title", "") for m in ordered[:6] if m.get("title")]
+        clean_titles = []
+        for t in top_titles:
+            if re.match(r"^(reviews|amazon\.com)", t, flags=re.I):
+                continue
+            t_clean = re.sub(r"^Buy\s+", "", t, flags=re.I)
+            t_clean = re.split(r"\s*(?:[-|:(]|\b(?:powered by|enriched with|with|for|anti-frizz)\b)\s*", t_clean, maxsplit=1, flags=re.I)[0]
+            t_clean = re.sub(r"\s*\.{2,}$", "", t_clean).strip()
+            if len(t_clean.split()) >= 3:
+                clean_titles.append(t_clean)
+        best_title = _consensus_title(clean_titles) if clean_titles else top_titles[0]
+        links = []
+        for m in retailer_hits[:8]:
+            p = m.get("price") or {}
+            links.append({"source": m.get("source"), "title": m.get("title"),
+                          "price": p.get("extracted_value") or p.get("value"),
+                          "link": m.get("link"), "thumbnail": m.get("thumbnail")})
+        seed_lens_hints(links)
+        return {
+            "lens_top_match": best_title,
+            "lens_candidates": top_titles[:4],
+            "lens_store_links": links[:5],
+            "search_query": best_title,
+        }
+    except Exception:
+        return None
+
+
 @tool
 def describe_product_image(image_path: str) -> str:
-    """Identify a beauty product from an uploaded photo and return structured attributes."""
+    """Identify a beauty product from an uploaded photo using Google Lens visual search + Vision AI."""
     real_path = os.path.realpath(image_path)
     temp_dir = os.path.realpath(tempfile.gettempdir())
     ext = os.path.splitext(real_path)[1].lower()
     if not real_path.startswith(temp_dir + os.sep) or ext not in ALLOWED_IMAGE_EXTS or not os.path.isfile(real_path):
         return json.dumps({"error": "Invalid image path."})
 
+    lens_hit = _google_lens_lookup(real_path)
+    # If Google Lens already found a clear product title (3+ words, not a generic social caption), use it directly
+    if lens_hit and len((lens_hit.get("search_query") or "").split()) >= 3:
+        return json.dumps(lens_hit)
+
+    # Otherwise use Gemini / Groq Vision AI to read the exact brand + product name from the packaging
     with open(real_path, "rb") as f:
         image_data = base64.b64encode(f.read()).decode()
     mime = "image/jpeg" if ext in (".jpg", ".jpeg") else f"image/{ext.lstrip('.')}"
@@ -167,7 +251,10 @@ def describe_product_image(image_path: str) -> str:
                 timeout=60,
             )
             resp.raise_for_status()
-            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            if lens_hit:
+                return json.dumps({"vision_result": text, **lens_hit})
+            return text
         except Exception:
             pass
 
@@ -178,8 +265,9 @@ def describe_product_image(image_path: str) -> str:
         ])
         return vision_llm.invoke([msg]).content
     except Exception as e:
+        if lens_hit:
+            return json.dumps(lens_hit)
         return json.dumps({"error": f"Vision model unavailable: {type(e).__name__}"})
-
 
 # ---------------------------------------------------------------------------
 # 3. ReAct Agent Initialization
@@ -216,7 +304,6 @@ agent = create_agent(
         "Product cards appear under your reply, so for single-product lookups write 1–2 friendly sentences highlighting the best deal and savings. "
         "If exact_match is false, mention closest_match. NEVER invent or guess approximate prices or Markdown tables if offers is empty.\n\n"
         "REVIEWS: ONLY call get_reddit_reviews or get_youtube_reviews when the user explicitly asks for reviews, feedback, pros/cons, or whether a product is good. NEVER call review tools during price checks or image lookups. When asked, summarize pros, cons, and consensus with clickable Markdown links like [Title](https://...). Mention skipped sponsored videos.\n\n"
-        "with clickable Markdown links like [Title](https://...). Mention skipped sponsored videos.\n\n"
         "IMAGES: Call describe_product_image first, then IMMEDIATELY call compare_prices with its search_query (brand + product name only, no shade code).\n\n"
         "CART: Call add_to_cart when requested. If the user specifies an app, pass store='nykaa'/'tira'/'amazon'; otherwise leave "
         "store empty so it defaults to Amazon. Confirm warmly which store it went to and the price. You can NEVER place an order or pay.\n\n"
