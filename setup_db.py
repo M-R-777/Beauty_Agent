@@ -52,11 +52,13 @@ def create_database() -> None:
         CREATE TABLE IF NOT EXISTS cart_items (
             product_id INTEGER NOT NULL,
             store      TEXT NOT NULL,
+            shade      TEXT DEFAULT '',
+            size       TEXT DEFAULT '',
             title      TEXT,
             price      REAL NOT NULL,
             url        TEXT,
             qty        INTEGER DEFAULT 1,
-            PRIMARY KEY (product_id, store),
+            PRIMARY KEY (product_id, store, shade, size),
             FOREIGN KEY (product_id) REFERENCES products(id)
         );
 
@@ -85,20 +87,22 @@ def create_database() -> None:
     if "creator" not in cols:
         conn.execute("ALTER TABLE looks ADD COLUMN creator TEXT")
 
-    # Migrate legacy cart_items (PK only on product_id) to composite PK (product_id, store)
-    cart_pk = {r["name"]: r["pk"] for r in conn.execute("PRAGMA table_info(cart_items)").fetchall()}
-    if cart_pk.get("product_id") == 1 and cart_pk.get("store", 0) == 0:
+    # Migrate legacy cart_items to support composite keys with shade and size
+    cart_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cart_items)").fetchall()}
+    if "shade" not in cart_cols:
         conn.executescript(
             """
             ALTER TABLE cart_items RENAME TO cart_items_old;
             CREATE TABLE cart_items (
                 product_id INTEGER NOT NULL,
                 store      TEXT NOT NULL,
+                shade      TEXT DEFAULT '',
+                size       TEXT DEFAULT '',
                 title      TEXT,
                 price      REAL NOT NULL,
                 url        TEXT,
                 qty        INTEGER DEFAULT 1,
-                PRIMARY KEY (product_id, store),
+                PRIMARY KEY (product_id, store, shade, size),
                 FOREIGN KEY (product_id) REFERENCES products(id)
             );
             INSERT OR IGNORE INTO cart_items (product_id, store, title, price, url, qty)

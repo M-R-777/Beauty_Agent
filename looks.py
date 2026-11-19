@@ -1,12 +1,5 @@
-"""Looks: turn a makeup video into a saved loadout of products.
+"""Looks: turn a makeup video into a saved loadout of products."""
 
-Sources
-  YouTube link (video or Short): title, channel, thumbnail and description come from the
-      YouTube Data API (YOUTUBE_API_KEY). Products are read from the description first;
-      if that gives fewer than 2, the spoken transcript is used too.
-  Pasted text: a caption or product list pasted by the user. This is how Instagram works,
-      because Instagram does not allow reading posts from a program.
-"""
 import json
 import os
 import re
@@ -21,24 +14,30 @@ from setup_db import get_conn
 
 RESOURCES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources")
 YT_ID = re.compile(r"(?:youtu\.be/|youtube\.com/(?:watch\?(?:[^ ]*&)?v=|shorts/|embed/|live/))([A-Za-z0-9_-]{11})")
-DESCRIPTION_CHARS = 3500   # keep prompts small: Groq free tier is 8000 tokens/minute
+DESCRIPTION_CHARS = 3500
 TRANSCRIPT_CHARS = 6000
 
+# We explicitly tell the AI what NOT to extract
 PROMPT = (
-    "You extract beauty products from a makeup / skincare / haircare video.\n"
-    "From the TEXT below, list every product the creator used or recommends. Ignore music, "
-    "camera gear, social media links, discount codes, sponsor slogans and non-beauty items.\n"
-    "Return ONLY a JSON array. Each item: {\"query\": \"<brand + product name + shade if given>\"}.\n"
-    "Use only what the text says; never invent products or shades. Merge duplicates. "
+    "You extract beauty products from a makeup / skincare / haircare video description.\n"
+    "From the TEXT below, list every product the creator used or recommends. "
+    "Do NOT extract: shopping platforms (Amazon, Nykaa, Myntra, Flipkart, Tira, Purplle, Blinkit), "
+    "social media (Instagram, YouTube, Website), or phrases like 'Link in bio', 'Will start posting soon'.\n"
+    "DO extract the product name, even if it is next to a link or a platform name.\n"
+    "Return ONLY a valid JSON array. No Markdown formatting, no backticks.\n"
+    "Format: [{\"query\": \"<brand + product name + shade>\"}]\n"
     "If the text names no products, return [].\n\nTEXT:\n"
 )
 
+# Ignore these if they appear as the only extracted text
+NOISE_WORDS = {
+    "amazon", "nykaa", "myntra", "flipkart", "tira", "purplle", "blinkit", 
+    "instagram", "youtube", "website", "link in bio", "my instagram", 
+    "will start posting soon", "subscribe", "follow me", "social media"
+}
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+
 def _safe_error(e: Exception) -> str:
-    """Readable reason that never contains an API key (requests errors include the URL)."""
     if isinstance(e, requests.HTTPError) and e.response is not None:
         return f"HTTP {e.response.status_code} from the server"
     if isinstance(e, requests.ConnectionError):
@@ -59,49 +58,79 @@ def _llm_call(prompt: str) -> str:
 def _llm_products(text: str) -> list[str]:
     if not text.strip():
         return []
-    out = re.sub(r"<think>.*?</think>", "", _llm_call(PROMPT + text), flags=re.S)
-    m = re.search(r"\[.*\]", out, flags=re.S)
-    try:
-        data = json.loads(m.group()) if m else []
-    except Exception:
-        data = []
+    
     queries, seen = [], set()
-    for d in data:
-        q = (d.get("query") if isinstance(d, dict) else str(d)) or ""
-        q = re.sub(r"\s+", " ", q).strip()
-        if q and q.lower() not in seen:
-            seen.add(q.lower())
-            queries.append(q)
+    
+    # 1. AI Extraction
+    try:
+        out = re.sub(r"<think>.*?</think>", "", _llm_call(PROMPT + text), flags=re.S)
+        m = re.search(r"\[.*\]", out, flags=re.S)
+        if m:
+            data = json.loads(m.group())
+            for d in data:
+                q = (d.get("query") if isinstance(d, dict) else str(d)) or ""
+                q = re.sub(r"\s+", " ", q).strip()
+                # Extra safety: ignore if the AI still extracted just a platform name
+                if q and q.lower() not in seen and q.lower() not in NOISE_WORDS:
+                    seen.add(q.lower())
+                    queries.append(q)
+    except Exception:
+        pass 
+        
+    if queries:
+        return queries
+
+    # 2. Regex Fallback
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line: continue
+        match = re.match(r"^[-*]?\s*(.*?)(?::|\s*[-|]\s*http|https?://|www\.)", line)
+        if match:
+            q = match.group(1).strip()
+            q = re.sub(r"^\*+|\[|\]", "", q).strip()
+            if 3 < len(q) < 80 and not q.lower().startswith(("http", "www")):
+                if q.lower() not in seen and q.lower() not in NOISE_WORDS:
+                    seen.add(q.lower())
+                    queries.append(q)
+                    
     return queries
 
 
 def fetch_youtube_meta(video_id: str) -> dict:
     key = os.environ.get("YOUTUBE_API_KEY")
     if key:
-        r = requests.get("https://www.googleapis.com/youtube/v3/videos",
-                         params={"part": "snippet", "id": video_id, "key": key}, timeout=30)
-        r.raise_for_status()
-        items = r.json().get("items", [])
-        if items:
-            sn = items[0]["snippet"]
-            th = sn.get("thumbnails", {})
-            thumb = (th.get("maxres") or th.get("high") or th.get("medium") or {}).get("url")
-            return {"title": sn.get("title"), "channel": sn.get("channelTitle"),
-                    "description": sn.get("description", ""), "thumbnail": thumb}
-    # No key (or video not found): oEmbed gives title, channel and thumbnail but no description
+        try:
+            r = requests.get("https://www.googleapis.com/youtube/v3/videos",
+                             params={"part": "snippet", "id": video_id, "key": key}, timeout=30)
+            if r.ok:
+                items = r.json().get("items", [])
+                if items:
+                    sn = items[0]["snippet"]
+                    th = sn.get("thumbnails", {})
+                    thumb = (th.get("maxres") or th.get("high") or th.get("medium") or {}).get("url")
+                    return {"title": sn.get("title"), "channel": sn.get("channelTitle"),
+                            "description": sn.get("description", ""), "thumbnail": thumb}
+        except Exception:
+            pass
+
+    description = ""
+    try:
+        r = requests.get(f"https://www.youtube.com/watch?v={video_id}", headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        match = re.search(r'"shortDescription":"(.*?)","isCrawlable"', r.text)
+        if match:
+            description = json.loads(f'"{match.group(1)}"')
+    except Exception:
+        pass
+
     r = requests.get("https://www.youtube.com/oembed",
                      params={"url": f"https://www.youtube.com/watch?v={video_id}", "format": "json"}, timeout=30)
     r.raise_for_status()
     j = r.json()
     return {"title": j.get("title"), "channel": j.get("author_name"),
-            "description": "", "thumbnail": j.get("thumbnail_url")}
+            "description": description, "thumbnail": j.get("thumbnail_url")}
 
 
-# ---------------------------------------------------------------------------
-# Import
-# ---------------------------------------------------------------------------
 def import_look(url: str = "", pasted: str = "") -> dict:
-    """Create a look from a YouTube link and/or pasted text. Returns {ok, look_id, count, source} or {ok: False, error}."""
     url, pasted = (url or "").strip(), (pasted or "").strip()
     host = urlparse(url).netloc.lower() if url else ""
     if "instagram.com" in host and not pasted:
@@ -125,7 +154,7 @@ def import_look(url: str = "", pasted: str = "") -> dict:
         if pasted and not meta["description"]:
             source = "pasted text"
         queries = _llm_products(text)
-        if len(queries) < 2 and video_id:  # description had no (or almost no) product list
+        if len(queries) < 2 and video_id:
             transcript = get_transcript(video_id, max_chars=TRANSCRIPT_CHARS)
             if transcript:
                 more = _llm_products(f"Video title: {meta['title']}\n(spoken transcript)\n{transcript}")
@@ -203,7 +232,6 @@ def delete_look(look_id: int) -> None:
 # Cart
 # ---------------------------------------------------------------------------
 def add_look_to_cart(look_id: int, progress=None) -> list[dict]:
-    """Add every product to the cart using the dashboard toggle. Returns one result per product."""
     items = get_items(look_id)
     results = []
     for i, query in enumerate(items):

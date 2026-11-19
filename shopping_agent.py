@@ -1,4 +1,5 @@
 """Agentic AI orchestration layer using LangChain's ReAct tool-calling agent."""
+from concurrent.futures import ThreadPoolExecutor
 import base64
 import json
 import os
@@ -67,6 +68,28 @@ def get_skin_profile() -> str:
         return json.dumps({"has_profile": False, "message": "User has not completed the Skin Quiz tab yet."})
     return json.dumps({"has_profile": True, **profile})
 
+@tool
+def compare_routine_prices(product1: str, product2: str, product3: str) -> str:
+    """Optimized tool for comparing prices of 3 routine products AT ONCE in parallel.
+    Use this instead of calling compare_prices three separate times for a routine.
+    """
+    def fetch(p):
+        return get_offers_with_fallback(p, target_store="")
+        
+    # Fires all 3 searches simultaneously instead of waiting for one by one
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        results = list(pool.map(fetch, [product1, product2, product3]))
+    
+    output = []
+    for res in results:
+        if res.get("error"):
+            continue
+        shown = cart.visible_offers(res)
+        output.append({
+            "product": res["name"],
+            "offers": [{"store": STORE_LABELS.get(o["store"], o["store"]), "price": o["price"]} for o in shown]
+        })
+    return json.dumps(output)
 
 @tool
 def compare_prices(product: str, product_type: str = "", store: str = "") -> str:
@@ -274,7 +297,7 @@ def describe_product_image(image_path: str) -> str:
 # ---------------------------------------------------------------------------
 agent = create_agent(
     tools=[
-        get_skin_profile, compare_prices, add_to_cart, remove_from_cart,
+        get_skin_profile, compare_prices, compare_routine_prices, add_to_cart, remove_from_cart,
         view_cart, get_reddit_reviews, get_youtube_reviews, describe_product_image,
     ],
     model=llm,
@@ -290,9 +313,9 @@ agent = create_agent(
         "SKIN ROUTINES & BUDGET PLANNING:\n"
         "- Call get_skin_profile first, then call get_reddit_reviews ONCE for '<skin_type> skincare routine IndianSkincareAddicts'.\n"
         "- Do NOT call get_youtube_reviews during routine building.\n"
-        "- Choose 3 budget-conscious, well-known Indian OTC products upfront (1. Cleanser, 2. Moisturizer, 3. Sunscreen) "
-        "whose combined price comfortably fits under the user's budget, and call compare_prices ONCE per product (3 calls max, no swaps/retries).\n"
-        "- Present each step warmly, why Reddit loves it, its lowest price, and the total routine cost vs. budget.\n\n"
+        "- Choose 3 budget-conscious, well-known Indian OTC products upfront (1. Cleanser, 2. Moisturizer, 3. Sunscreen).\n"
+        "- CRITICAL: Call `compare_routine_prices` exactly ONCE, passing all 3 product names. Do NOT call `compare_prices` 3 times.\n"
+        "- Do NOT retry or swap products if one is over budget. Just present the routine and explain that it's the closest match.\n"
         "ROUTINE CUSTOMIZATION IN CHAT (SWAPS, ADDITIONS & REMOVALS):\n"
         "- When the user asks to swap a routine product (e.g., 'that sunscreen clogs my pores, suggest something in the same budget'), "
         "add a step (e.g., 'what if I want to add a serum?'), or remove a step from the routine discussed in recent messages:\n"

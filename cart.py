@@ -46,19 +46,19 @@ def visible_offers(data: dict, requested_store: str = "") -> list[dict]:
     return offers[:TOP_N]
 
 
-def _upsert_cart_item(product_id: int, store: str, title: str, price: float, url: str, qty: int) -> None:
+def _upsert_cart_item(product_id: int, store: str, title: str, price: float, url: str, qty: int, shade: str = "", size: str = "") -> None:
     conn = get_conn()
     conn.execute(
         """
-        INSERT INTO cart_items (product_id, store, title, price, url, qty)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(product_id, store) DO UPDATE SET
+        INSERT INTO cart_items (product_id, store, shade, size, title, price, url, qty)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(product_id, store, shade, size) DO UPDATE SET
             title = excluded.title,
             price = excluded.price,
             url   = excluded.url,
             qty   = cart_items.qty + excluded.qty
         """,
-        (product_id, store, title, price, url, max(1, qty)),
+        (product_id, store, shade.strip(), size.strip(), title, price, url, max(1, qty)),
     )
     conn.commit()
     conn.close()
@@ -103,30 +103,34 @@ def add_item(query: str, qty: int = 1, store: str = "") -> dict:
     }
 
 
-def add_offer(product_id: int, store: str, qty: int = 1) -> bool:
-    """Add a specific store card offer directly to the cart."""
+def add_offer(product_id: int, store: str, qty: int = 1, shade: str = "", size: str = "") -> bool:
     conn = get_conn()
     o = conn.execute("SELECT * FROM offers WHERE product_id = ? AND store = ?", (product_id, store)).fetchone()
     conn.close()
     if not o:
         return False
     url = o["url"] if o["is_mock"] else direct_link(store, o["title"], o["url"])
-    _upsert_cart_item(product_id, store, o["title"], o["price"], url, qty)
+    
+    # Append the variant details to the title for display
+    final_title = o["title"]
+    variant_str = " / ".join(filter(None, [size.strip(), shade.strip()]))
+    if variant_str:
+        final_title += f" ({variant_str})"
+
+    _upsert_cart_item(product_id, store, final_title, o["price"], url, qty, shade, size)
     return True
 
 
-def remove_item(query: str, store: str = "") -> bool:
+def remove_item(query: str, store: str = "", shade: str = "", size: str = "") -> bool:
     name = re.sub(r"\s+", " ", query.strip().lower())
     conn = get_conn()
     
     if store:
-        # Delete only from the specific store
         cur = conn.execute(
-            "DELETE FROM cart_items WHERE store = ? AND product_id IN (SELECT id FROM products WHERE name LIKE ?)",
-            (store, f"%{name}%"),
+            "DELETE FROM cart_items WHERE store = ? AND shade = ? AND size = ? AND product_id IN (SELECT id FROM products WHERE name LIKE ?)",
+            (store, shade.strip(), size.strip(), f"%{name}%"),
         )
     else:
-        # Fallback: delete across all stores (keeps the AI agent working as before)
         cur = conn.execute(
             "DELETE FROM cart_items WHERE product_id IN (SELECT id FROM products WHERE name LIKE ?)",
             (f"%{name}%",),
@@ -148,6 +152,13 @@ def _find_amazon_asin_url(title: str) -> str | None:
     api_key = os.environ.get("SERPAPI_KEY")
     if not api_key or not title:
         return None
+        
+    # Extract important keywords to verify we got the right product
+    stop_words = {"the", "a", "an", "for", "and", "with", "from", "of", "in", "by", "buy", "online", "india"}
+    keywords = [w for w in re.findall(r"[a-z0-9]+", title.lower()) if w not in stop_words and len(w) > 2]
+    if not keywords:
+        return None
+
     try:
         resp = requests.get(
             "https://serpapi.com/search.json",
@@ -156,8 +167,14 @@ def _find_amazon_asin_url(title: str) -> str | None:
         )
         for item in resp.json().get("organic_results", []):
             asin = item.get("asin")
-            if asin and len(asin) == 10:
-                return f"https://www.amazon.in/dp/{asin}"
+            amazon_title = item.get("title", "").lower()
+            
+            # Verify the result actually contains a significant portion of our search keywords
+            if asin and len(asin) == 10 and amazon_title:
+                match_count = sum(1 for kw in keywords if kw in amazon_title)
+                # Require at least 50% of the keywords to match to accept the ASIN
+                if match_count / len(keywords) >= 0.5: 
+                    return f"https://www.amazon.in/dp/{asin}"
     except Exception:
         pass
     return None
@@ -183,7 +200,7 @@ def get_cart() -> dict:
                 conn.commit()
 
         grp = stores.setdefault(r["store"], {"label": STORE_LABELS.get(r["store"], r["store"]), "items": [], "total": 0.0})
-        grp["items"].append({"name": r["name"], "title": r["title"], "price": r["price"], "qty": r["qty"], "url": url})
+        grp["items"].append({"name": r["name"], "title": r["title"], "price": r["price"], "qty": r["qty"], "url": url, "shade": r["shade"], "size": r["size"]})
         grp["total"] += r["price"] * r["qty"]
 
     conn.close()

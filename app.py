@@ -53,7 +53,7 @@ WELCOME_MSG = (
     "- **Compare live prices** across Nykaa, Tira, Amazon, Myntra, Purplle & official brand sites\n"
     "- **Check real, unsponsored reviews** from Reddit & YouTube before you buy\n"
     "- **Build & customize a budget skincare routine** (take the **Skin Quiz** in the sidebar to start!)\n"
-    "- **Shop by photo** or import a creator's makeup look\n\n"
+    "- **Shop by photo** or- Import creator routines/looks from YouTube"
     "What are we hunting for today? 🧴💄"
 )
 
@@ -86,18 +86,27 @@ def run_agent(skip_gate: bool = False) -> tuple[str, list[dict]]:
     products: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for m in msgs[last_human + 1:]:
-        if getattr(m, "type", "") == "tool" and getattr(m, "name", "") == "compare_prices":
+        if getattr(m, "type", "") == "tool" and getattr(m, "name", "") in ("compare_prices", "compare_routine_prices"):
             try:
                 payload = json.loads(m.content)
-                name = payload.get("product")
-                req_store = payload.get("requested_store") or ""
+                if isinstance(payload, list): 
+                    # It's the compare_routine_prices tool
+                    for item in payload:
+                        name = item.get("product")
+                        if name and (name, "") not in seen:
+                            seen.add((name, ""))
+                            products.append({"name": name, "store": ""})
+                else: 
+                    # It's the standard compare_prices tool
+                    name = payload.get("product")
+                    req_store = payload.get("requested_store") or ""
+                    if name and (name, req_store) not in seen:
+                        seen.add((name, req_store))
+                        products.append({"name": name, "store": req_store})
             except Exception:
                 continue
-            if name and (name, req_store) not in seen:
-                seen.add((name, req_store))
-                products.append({"name": name, "store": req_store})
+                
     return msgs[-1].content.replace("`", ""), products
-
 
 # ---------------------------------------------------------------------------
 # Product cards (Google Shopping style)
@@ -150,8 +159,15 @@ def render_cards(item: dict | str, key_prefix: str) -> None:
                     st.caption((o["title"] or "")[:90])
                     link = usable_url(o["store"], o["title"], o.get("url"))
                     st.link_button(f"View on {label}", link, use_container_width=True)
-                    if st.button("Add to cart", key=f"{key_prefix}_{o['store']}", use_container_width=True):
-                        if cart.add_offer(data["product_id"], o["store"]):
+                     # New inputs for Qty, Size, and Shade
+                    q_col, s_col = st.columns([1, 2])
+                    qty = q_col.number_input("Qty", min_value=1, max_value=10, value=1, key=f"qty_{key_prefix}_{o['store']}", label_visibility="collapsed")
+                    size = s_col.text_input("Size", placeholder="Size/Vol (e.g. 50ml)", key=f"size_{key_prefix}_{o['store']}", label_visibility="collapsed")
+                    
+                    shade = st.text_input("Shade", placeholder="Shade/Variant (optional)", key=f"shade_{key_prefix}_{o['store']}", label_visibility="collapsed")
+
+                    if st.button("Add to cart", key=f"btn_{key_prefix}_{o['store']}", use_container_width=True):
+                        if cart.add_offer(data["product_id"], o["store"], qty, shade, size):
                             st.toast(f"Added to your {label} cart")
 
 
@@ -163,7 +179,7 @@ if "goto" in st.session_state:
 
 with st.sidebar:
     st.markdown("## 💄 Skipia.ai")
-    screen = st.radio("Navigate", ["Chat", "Skin Quiz", "Looks", "Cart"], horizontal=True, key="screen")
+    screen = st.radio("Navigate", ["Chat", "Skin Quiz", "Routines & Glam", "Cart"], horizontal=True, key="screen")
 
     saved_profile = skin_quiz.get_skin_profile()
     if saved_profile:
@@ -332,30 +348,28 @@ def show_cart() -> None:
             for item in group["items"]:
                 col1, col2 = st.columns([10, 1])
                 line = f"{item['qty']} × {item['name'].title()} — ₹{item['price']:,.0f}"
+                    
+                # Display the size/shade if they exist
+                variant_str = " / ".join(filter(None, [item.get('size'), item.get('shade')]))
+                if variant_str:
+                    line += f" · *{variant_str}*"
+                        
                 if item["url"]:
                     line += f"  ([view product]({item['url']}))"
                 col1.markdown(line)
-                if col2.button("🗑️", key=f"del_{store}_{item['name']}", help="Remove from cart"):
-                    cart.remove_item(item["name"], store)
+                    
+                # Pass the size and shade to remove_item so it deletes exactly this variant
+                if col2.button("🗑️", key=f"del_{store}_{item['name']}_{item.get('size','')}_{item.get('shade','')}", help="Remove from cart"):
+                    cart.remove_item(item["name"], store, item.get("shade", ""), item.get("size", ""))
                     st.rerun()
-            if group.get("bulk_link"):
-                st.link_button(f"Open {group['label']} cart with all items", group["bulk_link"])
-            else:
-                st.caption(f"{group['label']} has no one-click cart link; open each product above and tap Add to Bag.")
-
-    st.metric("Grand total", f"₹{data['grand_total']:,.0f}")
-    st.caption("Prices come from Google Shopping and can differ slightly on the store.")
-    if st.button("Clear cart"):
-        cart.clear_cart()
-        st.rerun()
 
 
 # ---------------------------------------------------------------------------
 # Looks screen
 # ---------------------------------------------------------------------------
 def show_looks() -> None:
-    st.title("🎨 Looks")
-    st.caption("Drop a makeup video link and Skipia will pull out the products used. Save it, then add the whole look to your cart.")
+    st.title("🎨 Routines & Glam")
+    st.caption("Drop a YouTube link or caption and Skipia will extract the products used. Save it, then add the whole routine or look to your cart.")
 
     with st.container(border=True):
         url = st.text_input("YouTube link (video or Short)", placeholder="https://www.youtube.com/watch?v=...")
@@ -403,19 +417,7 @@ def show_looks() -> None:
                         st.session_state.goto = "Chat"
                         st.rerun()
 
-                b1, b2 = st.columns(2)
-                if b1.button("Add all to cart", key=f"addall_{lid}", use_container_width=True, disabled=not items):
-                    bar = st.progress(0.0, text="Starting…")
-                    results = looks.add_look_to_cart(
-                        lid, progress=lambda i, n, q: bar.progress(i / n, text=f"Finding {q} ({i + 1}/{n})"))
-                    bar.empty()
-                    for r in results:
-                        if r["ok"]:
-                            st.markdown(f"✅ {r['query']} → **{r['store']}** ₹{r['price']:,.0f}")
-                        else:
-                            st.markdown(f"❌ {r['query']}: {r['error']}")
-                    st.caption("Open the Cart screen to see everything.")
-                if b2.button("Delete look", key=f"del_{lid}", use_container_width=True):
+                if st.button("Delete look", key=f"del_{lid}", use_container_width=True):
                     looks.delete_look(lid)
                     st.rerun()
 
@@ -477,7 +479,7 @@ if screen == "Cart":
     show_cart()
 elif screen == "Skin Quiz":
     show_skin_quiz()
-elif screen == "Looks":
+elif screen == "Routines & Glam":
     show_looks()
 else:
     show_chat()
