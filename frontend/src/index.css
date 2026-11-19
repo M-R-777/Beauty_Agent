@@ -1,0 +1,121 @@
+@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@500;600;700;800&family=Quicksand:wght@600;700&display=swap');
+
+:root {
+  --sky-top: #bceaff;
+  --sky-mid: #e6f9ff;
+  --aqua-deep: #0284c7;
+  --lime-top: #bef264;
+  --text-main: #083358;
+  --text-muted: #1e6082;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: 'Nunito', 'Segoe UI', sans-serif;
+  color: var(--text-main);
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 12% 16%, rgba(255, 255, 255, 0.85) 0%, transparent 25%),
+    radial-gradient(circle at 86% 18%, rgba(134, 239, 172, 0.55) 0%, transparent 28%),
+    radial-gradient(circle at 75% 84%, rgba(56, 189, 248, 0.45) 0%, transparent 32%),
+    linear-gradient(155deg, #b8e8ff 0%, #e4f8ff 42%, #d2f8ec 76%, #aee2ff 100%);
+  background-attachment: fixed;
+}
+
+/* Floating Aero Bokeh Bubbles */
+.aero-bg-orbs { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: 0; }
+.aero-orb {
+  position: absolute; border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.9), rgba(125, 211, 252, 0.18) 65%, rgba(255, 255, 255, 0.5));
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  box-shadow: inset 0 4px 12px rgba(255, 255, 255, 0.9), 0 8px 24px rgba(14, 116, 184, 0.12);
+  animation: floatOrb 12s ease-in-out infinite alternate;
+}
+.orb-1 { width: 170px; height: 170px; top: 6%; left: 3%; }
+.orb-2 { width: 110px; height: 110px; top: 68%; left: 6%; animation-delay: 2s; }
+.orb-3 { width: 210px; height: 210px; bottom: 5%; right: 4%; animation-delay: 4s; }
+.orb-4 { width: 85px; height: 85px; top: 14%; right: 18%; animation-delay: 1s; }
+@keyframes floatOrb { from { transform: translateY(0px) scale(1); } to { transform: translateY(-18px) scale(1.04); } }
+
+/* Frosted Aqua Glass Panel */
+.aero-glass {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.88) 0%, rgba(232, 249, 255, 0.76) 100%);
+  border: 1.5px solid rgba(255, 255, 255, 0.96); border-radius: 22px;
+  box-shadow: 0 10px 30px rgba(14, 116, 184, 0.14), inset 0 2px 3px rgba(255, 255, 255, 1);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  position: relative;
+  /* Important: Allow dropdowns to overflow outside the box */
+  overflow: visible; 
+}
+
+/* Glossy Specular "Gel" Pill Buttons */
+.gel-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 9px 18px; border-radius: 999px; border: 1.5px solid rgba(255, 255, 255, 0.95);
+  font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 0.9rem;
+  color: #ffffff !important; text-decoration: none !important; cursor: pointer;
+  background: linear-gradient(180deg, #7dd3fc 0%, #38bdf8 48%, #0284c7 52%, #0ea5e9 100%);
+  box-shadow: 0 4px 12px rgba(2, 132, 199, 0.28), inset 0 2px 2px rgba(255, 255, 255, 0.8);
+  text-shadow: 0 1px 2px rgba(3, 54, 92, 0.45); transition: all 0.15s ease;
+}
+.gel-btn:hover:not(:disabled) { transform: translateY(-1.5px); filter: brightness(1.05); }
+.gel-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.gel-btn-lime { background: linear-gradient(180deg, #bef264 0%, #84cc16 48%, #4d7c0f 52%, #65a30d 100%); }
+.gel-btn-white { color: var(--text-main) !important; text-shadow: none; background: linear-gradient(180deg, #ffffff 0%, #e0f2fe 100%); }
+.gel-btn-danger { background: linear-gradient(180deg, #fda4af 0%, #f43f5e 48%, #be123c 52%, #e11d48 100%); }
+
+/* Inputs & Textareas */
+.aero-input, .aero-textarea {
+  width: 100%; padding: 10px 14px; border-radius: 14px; border: 1.5px solid rgba(255, 255, 255, 0.95);
+  background: rgba(255, 255, 255, 0.9); color: var(--text-main); font-family: inherit; font-size: 0.94rem;
+  box-shadow: inset 0 2px 5px rgba(14, 116, 184, 0.08); outline: none;
+}
+.aero-input:focus, .aero-textarea:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.25); }
+
+/* Dropdowns & Dropzones */
+.aero-dropdown { position: relative; width: 100%; }
+.aero-dropdown-trigger {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 10px 15px; border-radius: 15px; border: 1.5px solid rgba(255, 255, 255, 0.98);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(224, 247, 255, 0.88) 100%);
+  color: var(--text-main); font-weight: 700; font-size: 0.92rem; cursor: pointer;
+}
+.aero-dropdown-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 9999; padding: 6px;
+  border-radius: 16px; background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(232, 250, 255, 0.94) 100%);
+  border: 1.5px solid #ffffff; box-shadow: 0 14px 32px rgba(14, 116, 184, 0.22);
+  max-height: 230px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px;
+}
+.aero-dropdown-option { width: 100%; border: none; text-align: left; padding: 9px 13px; border-radius: 11px; font-weight: 700; cursor: pointer; background: transparent;}
+.aero-dropdown-option:hover, .aero-dropdown-option.active { background: linear-gradient(180deg, #7dd3fc 0%, #38bdf8 100%); color: white; }
+.aero-dropzone {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+  padding: 14px 12px; border-radius: 18px; border: 1.5px dashed #38bdf8;
+  background: rgba(255, 255, 255, 0.8); cursor: pointer; transition: all 0.15s ease;
+}
+.aero-dropzone:hover { background: rgba(255, 255, 255, 1); border-color: #0284c7; }
+.aero-radio-pill {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 13px;
+  border: 1.5px solid rgba(255, 255, 255, 0.9); background: rgba(255, 255, 255, 0.65); font-weight: 700; cursor: pointer;
+}
+.aero-radio-pill.selected { background: rgba(186, 230, 253, 0.88); border-color: #38bdf8; }
+
+/* Layout & Chat */
+.app-shell { position: relative; z-index: 1; max-width: 1280px; margin: 0 auto; padding: 18px; display: grid; grid-template-columns: 295px 1fr; gap: 18px; min-height: 100vh; }
+.aero-title { font-family: 'Quicksand', sans-serif; margin: 0; background: linear-gradient(180deg, #0284c7 0%, #0369a1 55%, #0d9488 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.chat-scroll { max-height: 64vh; overflow-y: auto; padding-right: 4px; display: flex; flex-direction: column; gap: 14px; }
+.bubble-assistant { align-self: flex-start; max-width: 92%; padding: 15px 18px; border-radius: 20px 20px 20px 6px; background: rgba(255,255,255,0.92); border: 1.5px solid #fff; box-shadow: 0 6px 18px rgba(14, 116, 184, 0.11); }
+.bubble-user { align-self: flex-end; max-width: 78%; padding: 12px 18px; border-radius: 20px 20px 6px 20px; color: #fff; font-weight: 600; background: linear-gradient(180deg, #38bdf8 0%, #0284c7 100%); }
+.offer-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; margin-top: 10px; }
+.offer-card { padding: 14px; border-radius: 18px; background: #fff; box-shadow: 0 6px 16px rgba(2, 132, 199, 0.12); display: flex; flex-direction: column; justify-content: space-between; }
+.offer-thumb { width: 100%; height: 125px; object-fit: contain; background: #fff; border-radius: 12px; margin-bottom: 8px; }
+
+/* Markdown Table Formatting (Fixes Overlapping Routine Text) */
+.aero-markdown p { margin: 0 0 12px 0; } 
+.aero-markdown a:not(.gel-btn) { color: #0284c7; font-weight: 700; }
+.aero-markdown table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.9rem; background: rgba(255,255,255,0.8); border-radius: 12px; overflow: hidden; }
+.aero-markdown th, .aero-markdown td { padding: 12px 14px; border: 1px solid rgba(186, 230, 253, 0.9); text-align: left; }
+.aero-markdown th { background: linear-gradient(180deg, #e0f2fe 0%, #bae6fd 100%); color: #0369a1; font-weight: 800; }
+.aero-markdown ul, .aero-markdown ol { margin: 8px 0 12px 0; padding-left: 20px; }
