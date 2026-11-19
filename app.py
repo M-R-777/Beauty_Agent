@@ -345,11 +345,11 @@ def show_cart() -> None:
     for store, group in data["stores"].items():
         with st.container(border=True):
             st.subheader(f"{group['label']}  ·  ₹{group['total']:,.0f}")
+            
             for item in group["items"]:
                 col1, col2 = st.columns([10, 1])
                 line = f"{item['qty']} × {item['name'].title()} — ₹{item['price']:,.0f}"
                     
-                # Display the size/shade if they exist
                 variant_str = " / ".join(filter(None, [item.get('size'), item.get('shade')]))
                 if variant_str:
                     line += f" · *{variant_str}*"
@@ -358,10 +358,15 @@ def show_cart() -> None:
                     line += f"  ([view product]({item['url']}))"
                 col1.markdown(line)
                     
-                # Pass the size and shade to remove_item so it deletes exactly this variant
                 if col2.button("🗑️", key=f"del_{store}_{item['name']}_{item.get('size','')}_{item.get('shade','')}", help="Remove from cart"):
                     cart.remove_item(item["name"], store, item.get("shade", ""), item.get("size", ""))
                     st.rerun()
+            
+            # THIS IS THE MISSING PART
+            if group.get("bulk_link"):
+                st.link_button(f"Open {group['label']} cart with all items", group["bulk_link"])
+            else:
+                st.caption(f"{group['label']} has no one-click cart link; open each product above and tap Add to Bag.")
 
 
 # ---------------------------------------------------------------------------

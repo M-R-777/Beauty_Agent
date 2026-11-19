@@ -196,7 +196,11 @@ def get_cart() -> dict:
                 resolved = _find_amazon_asin_url(r["title"])
             if resolved and ASIN_RE.search(resolved):
                 url = resolved
-                conn.execute("UPDATE cart_items SET url = ? WHERE product_id = ?", (url, r["product_id"]))
+                # Update ONLY this specific variant (size/shade) so we don't override the whole cart
+                conn.execute(
+                    "UPDATE cart_items SET url = ? WHERE product_id = ? AND store = ? AND shade = ? AND size = ?", 
+                    (url, r["product_id"], r["store"], r["shade"] or "", r["size"] or "")
+                )
                 conn.commit()
 
         grp = stores.setdefault(r["store"], {"label": STORE_LABELS.get(r["store"], r["store"]), "items": [], "total": 0.0})
@@ -216,5 +220,7 @@ def get_cart() -> dict:
                 parts.append(f"ASIN.{count}={m.group(1).upper()}&Quantity.{count}={item['qty']}")
         if count > 0:
             amazon["bulk_link"] = f"{AMAZON_ADD_URL}?{'&'.join(parts)}"
+        else:
+            amazon["bulk_link"] = None  # Explicitly set to None so the UI knows to show the caption"
 
     return {"stores": stores, "grand_total": sum(g["total"] for g in stores.values())}
