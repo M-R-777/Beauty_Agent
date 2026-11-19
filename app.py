@@ -53,8 +53,8 @@ WELCOME_MSG = (
     "- **Compare live prices** across Nykaa, Tira, Amazon, Myntra, Purplle & official brand sites\n"
     "- **Check real, unsponsored reviews** from Reddit & YouTube before you buy\n"
     "- **Build & customize a budget skincare routine** (take the **Skin Quiz** in the sidebar to start!)\n"
-    "- **Shop by photo** or- Import creator routines/looks from YouTube"
-    "What are we hunting for today? 🧴💄"
+    "- **Shop by photo** or- **Import creator routines/looks from YouTube**\n"
+    "\nWhat are we hunting for today? 🧴💄"
 )
 
 if "messages" not in st.session_state:
@@ -417,7 +417,19 @@ def show_looks() -> None:
                         st.session_state.goto = "Chat"
                         st.rerun()
 
-                if st.button("Delete look", key=f"del_{lid}", use_container_width=True):
+                b1, b2 = st.columns(2)
+                if b1.button("Add all to cart", key=f"addall_{lid}", use_container_width=True, disabled=not items):
+                    bar = st.progress(0.0, text="Starting…")
+                    results = looks.add_look_to_cart(
+                        lid, progress=lambda i, n, q: bar.progress(i / n, text=f"Finding {q} ({i + 1}/{n})"))
+                    bar.empty()
+                    for r in results:
+                        if r["ok"]:
+                            st.markdown(f"✅ {r['query']} → **{r['store']}** ₹{r['price']:,.0f}")
+                        else:
+                            st.markdown(f"❌ {r['query']}: {r['error']}")
+                    st.caption("Open the Cart screen to see everything.")
+                if b2.button("Delete look", key=f"del_{lid}", use_container_width=True):
                     looks.delete_look(lid)
                     st.rerun()
 
