@@ -167,19 +167,22 @@ def chat_endpoint(req: ChatRequest):
 
 
 def _identify_image_like_lens(file_bytes: bytes, filename: str) -> str | None:
-    """Identify the exact beauty product from an image using Gemini Vision (Google Lens style)."""
+    """Identify the exact beauty product from an image (Simplified Gemini acting like Google Lens)."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return None
     ext = os.path.splitext(filename or "upload.jpg")[1].lower()
     mime = "image/jpeg" if ext in (".jpg", ".jpeg", "") else f"image/{ext.lstrip('.')}"
     b64 = base64.b64encode(file_bytes).decode()
+    
+    # Tell Gemini to return plain text, exactly like Google Lens does
     prompt = (
         "Act like Google Lens. Identify the exact beauty/skincare/haircare/makeup product shown in this image. "
         "Read the exact brand and product name on the packaging. "
-        'Return ONLY JSON: {"query": "<clean 3-6 word brand + exact product name, no duplicate words>", "is_beauty": true}. '
-        'If not a beauty/personal-care product, return {"query": "", "is_beauty": false}.'
+        "Return ONLY a plain text string of the brand and product name, e.g. 'L'Oreal Paris Extraordinary Oil Serum'. "
+        "Do not return JSON. Do not return any other text. If not a beauty product, return 'unsupported'."
     )
+    
     try:
         resp = requests.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
@@ -188,10 +191,12 @@ def _identify_image_like_lens(file_bytes: bytes, filename: str) -> str | None:
             timeout=30,
         )
         resp.raise_for_status()
-        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        data = json.loads(re.search(r"\{.*\}", text, flags=re.S).group())
-        if data.get("is_beauty") and data.get("query"):
-            return re.sub(r"\s+", " ", data["query"]).strip()
+        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        
+        if text.lower() == "unsupported" or not text:
+            return None
+            
+        return text # Passes the string directly to price_sources.py!
     except Exception:
         pass
     return None

@@ -370,7 +370,7 @@ def _matches_product(title: str, query: str) -> bool:
     if not descriptors:
         return True
     hits = sum(1 for w in descriptors if w in t_words or w in t_norm)
-    return (hits / len(descriptors)) >= 0.6
+    return (hits / len(descriptors)) >= 0.8
 
 def _strict_match(title: str, query: str) -> bool:
     """True only if every meaningful query word is in the title (used to vet thumbnails)."""
