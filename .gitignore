@@ -1,7 +1,24 @@
-venv/
-__pycache__/
+# Environment variables
 .env
-*.db
-*.db-wal
-*.db-shm
-.browser_profile/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+env/
+
+# Database
+beauty.db
+beauty.db-shm
+beauty.db-wal
+
+# React Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Resources (Generated images)
+resources/
+
+# OS Files
+.DS_Store
+Thumbs.db
